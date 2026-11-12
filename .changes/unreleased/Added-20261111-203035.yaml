@@ -1,3 +1,0 @@
-kind: Added
-body: 'The repository of the model bridge, from the app template: the Node package with the Claude Agent SDK pinned at 0.3.322, the pure parts of the bridge with their unit tests, and the image build'
-time: 2026-11-11T20:30:35.009927909-08:00
