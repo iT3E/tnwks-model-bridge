@@ -1,6 +1,5 @@
 # The model bridge: Node, the Claude Agent SDK at the release that
-# package-lock.json pins, and the bridge. The service itself comes in the
-# next change; this image holds the SDK and the pure parts only. No secret and no config is in the
+# package-lock.json pins, and the bridge. No secret and no config is in the
 # image: the keys and the sign-in of the plan come as env vars at run time.
 FROM docker.io/library/node:24.22.3-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0
 
@@ -27,3 +26,4 @@ ENV NODE_ENV=production \
     BRIDGE_PORT=8080
 USER 65532:65532
 EXPOSE 8080
+CMD ["node", "src/bridge.mjs"]
