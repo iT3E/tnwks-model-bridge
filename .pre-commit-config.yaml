@@ -1,0 +1,45 @@
+---
+# Managed by Copier from https://github.com/iT3E/app-repo-template. Hook versions
+# move with template releases (Renovate bumps them in the template).
+# Install once per clone: task precommit:init   (bin/install-hooks)
+# Run everything:         task precommit:run
+fail_fast: false
+# commit-msg runs the privacy check on the message. bin/install-hooks
+# installs both hook types.
+default_install_hook_types: [pre-commit, commit-msg]
+default_stages: [pre-commit]
+repos:
+  # Secret scanning on staged changes. Config: .betterleaks.toml. The same
+  # scan runs in CI (.github/workflows/secret-scan.yaml), so a clone without
+  # hooks installed is still covered.
+  - repo: https://github.com/betterleaks/betterleaks
+    # renovate: datasource=github-tags depName=betterleaks/betterleaks
+    rev: v1.10.0
+    hooks:
+      - id: betterleaks
+  - repo: local
+    hooks:
+      # Family names and personal emails (bin/privacy-check, AGENTS.md
+      # "Privacy"): the staged files and your git identity, then the commit
+      # message. The denylist comes from $PRIVACY_TERMS or a tnwks-ops
+      # checkout next to this one; CI runs the same checks.
+      - id: privacy-check
+        name: privacy-check
+        entry: bin/privacy-check --cached
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: privacy-check-message
+        name: privacy-check (commit message)
+        entry: bin/privacy-check --message
+        language: system
+        stages: [commit-msg]
+        always_run: true
+      # Formatter: the repo's own prettier (a devDependency), so the hook and
+      # CI's format check never disagree on the version. Run npm ci first.
+      # Files in .prettierignore are skipped.
+      - id: prettier
+        name: prettier
+        entry: npx --no-install prettier --write --ignore-unknown
+        language: system
+        types: [text]

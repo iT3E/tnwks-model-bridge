@@ -1,0 +1,5 @@
+# bin/privacy-check exceptions: git pathspec globs whose files and paths the
+# check skips. Keep this list name-free (globs, not names) and short, and
+# add to it only when the owner decided an exception. A single line
+# elsewhere can opt out with a trailing "privacy:allow" comment. Commit
+# messages, PR text and comments have no exceptions.

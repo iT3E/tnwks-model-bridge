@@ -1,0 +1,52 @@
+---
+name: "Build"
+
+# Managed by Copier from https://github.com/iT3E/app-repo-template (see
+# .copier-answers.yml). The logic is in the reusable workflow it calls, from
+# https://github.com/iT3E/github-workflows. The template pins that release
+# (@<sha> # vX.Y.Z), and a template release moves it here as a
+# `copier update` PR.
+#
+# node: npm ci, then the package's lint, prettier --check, test and build scripts.
+# image: Docker build on PRs;
+# push :<version> and :sha-<short> from a v* tag (release.yaml dispatches
+# this workflow on the tags it creates). Never :latest.
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions: {}
+
+# One run per ref. PR runs cancel each other; main and tag runs queue.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  node:
+    name: node
+    permissions:
+      contents: read
+    uses: iT3E/github-workflows/.github/workflows/node.yaml@4968e2ea41429e3b8e9b1e77f41d222a5ea01436 # v1.8.1
+    with:
+      node-version-file: .nvmrc
+      lint: true
+      format-check: true
+
+  image:
+    name: image
+    needs: ["node"]
+    permissions:
+      contents: read
+      packages: write
+    uses: iT3E/github-workflows/.github/workflows/image.yaml@4968e2ea41429e3b8e9b1e77f41d222a5ea01436 # v1.8.1
+    with:
+      push-main: false
+      privacy-gate: history
+      test-command: |
+        bin/image-test "$IMAGE_REF"
+    secrets:
+      PRIVACY_TERMS: ${{ secrets.PRIVACY_TERMS }}

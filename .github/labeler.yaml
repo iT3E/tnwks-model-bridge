@@ -1,0 +1,22 @@
+---
+# actions/labeler v5+ match objects (https://github.com/actions/labeler#match-object).
+# Every label here must also be in .github/labels.yaml.
+area/docker:
+  - changed-files:
+      - any-glob-to-any-file: ["Dockerfile", ".dockerignore", "entrypoint.sh"]
+area/docs:
+  - changed-files:
+      - any-glob-to-any-file: ["*.md", "docs/**"]
+area/github:
+  - changed-files:
+      - any-glob-to-any-file: ".github/**"
+area/node:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.{js,mjs,cjs,ts,mts,cts,tsx,html,css,scss}"
+          - "package.json"
+          - "package-lock.json"
+          - ".nvmrc"
+          - "*.config.{js,mjs,cjs,ts}"
+          - "tsconfig*.json"
+          - "angular.json"

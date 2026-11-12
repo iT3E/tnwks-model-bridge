@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# The image test. The image job of CI (build.yaml) runs it on the image that
+# it built, before any push: a failed test means no image.
+#
+# Usage: bin/image-test <image ref>
+#
+# It checks that the image runs with a read-only root file system as a user
+# that is not root, and that it holds the SDK at the release of the lock
+# file. In CI only: never on a workstation that runs a live cluster in
+# Docker. The tests of the service come with the service.
+set -euo pipefail
+
+image="${1:?usage: bin/image-test <image ref>}"
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [[ "${CI:-}" != "true" ]]; then
+  echo "bin/image-test: the image test runs in CI only" >&2
+  exit 1
+fi
+
+want="$(node -p "require('$repo/package-lock.json').packages['node_modules/@anthropic-ai/claude-agent-sdk'].version")"
+out="$(docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges "$image" \
+  node --input-type=module -e "
+    import { readFileSync } from 'node:fs';
+    import { loadKeys } from '/app/src/messages.mjs';
+    const sdk = JSON.parse(readFileSync('/app/node_modules/@anthropic-ai/claude-agent-sdk/package.json', 'utf8'));
+    loadKeys({ BRIDGE_KEY_MAIN: 'x'.repeat(32) });
+    console.log(process.getuid() + ' ' + sdk.version);
+  ")"
+echo "image: uid and SDK: $out"
+[[ "$out" == "65532 $want" ]] || { echo "want: 65532 $want" >&2; exit 1; }
+if docker run --rm --read-only "$image" touch /app/x 2>/dev/null; then
+  echo "the root file system is writable" >&2
+  exit 1
+fi
+echo "image test: ok"

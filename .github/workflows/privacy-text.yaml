@@ -1,0 +1,34 @@
+---
+name: "Privacy (comments)"
+
+# Managed by Copier from https://github.com/iT3E/app-repo-template (see
+# .copier-answers.yml). The logic is in the reusable workflow it calls, from
+# https://github.com/iT3E/github-workflows. The template pins that release
+# (@<sha> # vX.Y.Z), and a template release moves it here as a
+# `copier update` PR.
+#
+# bin/privacy-check --text on comments, reviews and issues, right after
+# they're posted: a comment with a hit is deleted, a review body replaced,
+# an issue fails the run. PR titles and bodies are privacy.yaml.
+on:
+  issue_comment:
+    types: [created, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited]
+  issues:
+    types: [opened, edited]
+
+permissions: {}
+
+jobs:
+  text:
+    name: privacy-text
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    uses: iT3E/github-workflows/.github/workflows/privacy-text.yaml@4968e2ea41429e3b8e9b1e77f41d222a5ea01436 # v1.8.1
+    secrets:
+      PRIVACY_TERMS: ${{ secrets.PRIVACY_TERMS }}
