@@ -1,0 +1,20 @@
+# The model gateway of the test. Each name points at the bridge with the
+# bridge key of one trust domain, as the config of the ops repository does.
+# The values come from the env of the test, and they are fake.
+model_list:
+  - model_name: agents-workflows
+    litellm_params:
+      model: anthropic/claude-test
+      api_base: http://bridge:8080
+      api_key: os.environ/BRIDGE_KEY_WORKFLOWS
+  # The same entry with a key that the bridge does not know.
+  - model_name: agents-wrong-key
+    litellm_params:
+      model: anthropic/claude-test
+      api_base: http://bridge:8080
+      api_key: fake-bridge-key-that-the-bridge-does-not-know-0000
+litellm_settings:
+  telemetry: false
+  num_retries: 0
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
