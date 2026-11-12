@@ -10,6 +10,12 @@
 //
 // The log has one JSON line for each call, and never a text of a
 // conversation.
+//
+// On SIGTERM it drains: /health answers 503, the server takes no new
+// connection, a call that still comes gets a 503 that tells the caller to try
+// again, and the calls in work run to their end for up to
+// BRIDGE_DRAIN_SECONDS. At that time it cuts what is left with the same
+// error, which a caller can retry, and it exits.
 
 import { mkdirSync } from "node:fs";
 import http from "node:http";
@@ -37,6 +43,7 @@ const config = {
   callMs: number("BRIDGE_CALL_SECONDS", 300) * 1000,
   maxConversations: number("BRIDGE_MAX_CONVERSATIONS", 8),
   maxBodyBytes: number("BRIDGE_MAX_BODY_MB", 32) * 1024 * 1024,
+  drainMs: number("BRIDGE_DRAIN_SECONDS", 75) * 1000,
   stateDir: process.env.BRIDGE_STATE_DIR || join(tmpdir(), "tnwks-model-bridge"),
   version: process.env.BRIDGE_VERSION || "dev",
 };
@@ -60,10 +67,19 @@ const registry = new Registry({
   log,
 });
 
-function reply(res, status, type, message) {
-  res.writeHead(status, { "content-type": "application/json" });
+function reply(res, status, type, message, headers = {}) {
+  res.writeHead(status, { "content-type": "application/json", ...headers });
   res.end(JSON.stringify({ type: "error", error: { type, message } }));
 }
+
+// The error of a call at shutdown. Its type and its words tell a caller to
+// try again, on the next pod.
+const SHUTDOWN_STATUS = 503;
+const SHUTDOWN_MESSAGE = "bridge: service unavailable, the bridge is shutting down; try again";
+
+// The responses in work, each from its request to its last byte.
+const inWork = new Set();
+let draining = false;
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -83,7 +99,7 @@ function readBody(req) {
   });
 }
 
-async function handleMessages(req, res, started) {
+async function handleMessages(req, res, started, work) {
   const domain = domainOf(keys, req.headers["x-api-key"]);
   if (!domain) {
     // Nothing of the call goes to the log: not its body, not its headers.
@@ -121,7 +137,8 @@ async function handleMessages(req, res, started) {
   const extra = { dropped, cache_marks_removed: marks };
   const stream = body.stream === true;
 
-  let conversation = registry.find(domain, body);
+  const miss = {};
+  let conversation = registry.find(domain, body, miss);
   let mode = "matched";
   if (conversation?.sink) {
     line.conversation = conversation.ref;
@@ -138,6 +155,9 @@ async function handleMessages(req, res, started) {
   }
   line.conversation = conversation.ref;
   line.mode = mode;
+  // Why a call with a history did not match a live conversation (positions
+  // and kinds only). It changes nothing.
+  if (mode === "rebuilt") log("rebuild", { domain, model: body.model, conversation: conversation.ref, ...miss });
 
   const sink = new Sink({
     res,
@@ -147,6 +167,7 @@ async function handleMessages(req, res, started) {
     callMs: config.callMs,
     onEnd: (status) => done(status, extra),
   });
+  work.sink = sink;
   conversation.attach(sink);
   res.on("close", () => {
     if (!sink.done) {
@@ -161,11 +182,22 @@ async function handleMessages(req, res, started) {
 const server = http.createServer((req, res) => {
   const started = Date.now();
   const path = (req.url || "/").split("?")[0];
+  // Each response is in work until its last byte is out: the drain waits for
+  // it, the answers on the same connection too.
+  const work = { res, sink: null };
+  inWork.add(work);
+  const over = () => {
+    inWork.delete(work);
+    if (draining) drained();
+  };
+  res.on("finish", over);
+  res.on("close", over);
   if (req.method === "GET" && path === "/health") {
-    res.writeHead(200, { "content-type": "application/json" });
+    res.writeHead(draining ? 503 : 200, { "content-type": "application/json" });
     return res.end(
       JSON.stringify({
-        ok: true,
+        ok: !draining,
+        draining,
         conversations: registry.all.size,
         max_conversations: config.maxConversations,
         waiting_tool_calls: registry.waitingToolCalls(),
@@ -173,7 +205,12 @@ const server = http.createServer((req, res) => {
     );
   }
   if (req.method === "POST" && path === "/v1/messages") {
-    handleMessages(req, res, started).catch((error) => {
+    if (draining) {
+      log("call", { status: SHUTDOWN_STATUS, ms: Date.now() - started, draining: true });
+      req.resume();
+      return reply(res, SHUTDOWN_STATUS, "overloaded_error", SHUTDOWN_MESSAGE, { connection: "close" });
+    }
+    handleMessages(req, res, started, work).catch((error) => {
       log("handler_error", { kind: error?.name || "Error" });
       if (!res.headersSent) reply(res, 500, "api_error", "bridge: internal error");
       else res.end();
@@ -188,13 +225,53 @@ server.headersTimeout = 60_000;
 
 setInterval(() => registry.sweep(), 15_000).unref();
 
-for (const signal of ["SIGTERM", "SIGINT"]) {
-  process.on(signal, () => {
-    registry.closeAll("shutdown");
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 3000).unref();
-  });
+let drainTimer = null;
+let drainStarted = 0;
+let cut = 0;
+let exiting = false;
+
+// The end of the drain: no call is in work, or the time is up.
+function drained() {
+  if (exiting || inWork.size) return;
+  exiting = true;
+  clearTimeout(drainTimer);
+  registry.closeAll("shutdown");
+  log("drain_end", { ms: Date.now() - drainStarted, cut });
+  process.exit(0);
 }
+
+// The time of the drain is up: each call still in work gets the shutdown
+// error. A stream that started gets it as an error event.
+function cutCalls() {
+  const left = [...inWork];
+  for (const work of left) {
+    if (work.sink && !work.sink.done) work.sink.fail(SHUTDOWN_STATUS, SHUTDOWN_MESSAGE);
+    else if (!work.res.headersSent)
+      reply(work.res, SHUTDOWN_STATUS, "overloaded_error", SHUTDOWN_MESSAGE, { connection: "close" });
+    else work.res.end();
+  }
+  cut = left.length;
+  // Each response leaves the set when its last byte is out. Exit at the
+  // latest after two seconds.
+  setTimeout(() => {
+    inWork.clear();
+    drained();
+  }, 2000);
+}
+
+function drain(signal) {
+  if (draining) return;
+  draining = true;
+  drainStarted = Date.now();
+  log("drain_start", { signal, in_work: inWork.size, drain_seconds: config.drainMs / 1000 });
+  // No new connection. An idle connection closes now; a call that comes on
+  // an open one gets the shutdown error.
+  server.close();
+  drainTimer = setTimeout(cutCalls, config.drainMs);
+  drained();
+}
+
+for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => drain(signal));
 
 server.listen(config.port, config.host, () =>
   log("listening", {
@@ -203,6 +280,7 @@ server.listen(config.port, config.host, () =>
     domains: keys.map((k) => k.domain),
     max_conversations: config.maxConversations,
     idle_seconds: config.idleMs / 1000,
+    drain_seconds: config.drainMs / 1000,
     client_app: clientApp,
   }),
 );

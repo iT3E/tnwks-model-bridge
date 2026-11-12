@@ -17,6 +17,7 @@ import {
   lastToolUseIds,
   newInput,
   sha,
+  shapeDiff,
   shortHash,
   systemText,
   thinkingOf,
@@ -118,7 +119,8 @@ export class Sink {
   }
   fail(status, text) {
     if (this.done) return;
-    const body = errorBody(status === 529 ? "overloaded_error" : "api_error", text);
+    // 529 and 503 tell the caller to try again; the drain at shutdown uses 503.
+    const body = errorBody(status === 529 || status === 503 ? "overloaded_error" : "api_error", text);
     if (this.stream && this.res.headersSent) {
       this.res.write(`event: error\ndata: ${JSON.stringify(body)}\n\n`);
       this.res.end();
@@ -161,7 +163,10 @@ export class Registry {
   // the tool_use ids of the last answer, then by the hash of the model, the
   // system prompt and the history. A match needs the same model and system
   // prompt as the conversation has.
-  find(domainName, body) {
+  //
+  // For a call with a history and no match, it puts the reason of the miss
+  // in `miss` (see `explainMiss`), before it closes a conversation.
+  find(domainName, body, miss = {}) {
     const domain = this.domain(domainName);
     const at = lastAssistant(body.messages);
     if (at < 0) return null;
@@ -172,24 +177,55 @@ export class Registry {
     }
     const key = historyKey(body.model, body.system, body.messages.slice(0, at + 1));
     if (!conversation) conversation = domain.byHistory.get(key) || null;
-    if (!conversation || conversation.closed) return null;
-    if (conversation.model !== body.model || conversation.systemHash !== sha(systemText(body.system))) {
-      conversation.close("system_or_model_changed");
+    const missed = (closed) => {
+      Object.assign(miss, this.explainMiss(domainName, body), { closed });
+      if (closed) conversation.close(closed);
       return null;
-    }
+    };
+    if (!conversation || conversation.closed) return missed(null);
+    if (conversation.model !== body.model || conversation.systemHash !== sha(systemText(body.system)))
+      return missed("system_or_model_changed");
     const answered = newInput(body.messages).some((b) => b?.type === "tool_result");
-    if (conversation.unanswered() && !answered) {
-      conversation.close("tool_results_missing");
-      return null;
-    }
+    if (conversation.unanswered() && !answered) return missed("tool_results_missing");
     const names = new Set((body.tools || []).map((t) => t.name));
     const own = conversation.toolNames;
-    if (names.size !== own.size || [...names].some((n) => !own.has(n))) {
-      conversation.close("tools_changed");
-      return null;
-    }
+    if (names.size !== own.size || [...names].some((n) => !own.has(n))) return missed("tools_changed");
     domain.byHistory.delete(key);
     return conversation;
+  }
+
+  // Why the history of a call matched no live conversation. It compares the
+  // history with each live conversation of the same trust domain and model,
+  // and takes the closest one: one with the same system prompt first, then
+  // the one with the longest part in common. Counts, positions and kinds
+  // only: no text, no id and no hash of a content.
+  // - `live`: the count of live conversations of the domain and the model;
+  // - `same_system`: one of them has the system prompt of the call;
+  // - `system_changed`: with no such one, a live one has another system
+  //   prompt (so the system prompt of the caller changed);
+  // - `diff`: the first difference of the history against the closest one
+  //   (`shapeDiff`), or null when the histories are the same;
+  // - `closest`: the reference of the closest one, as in the log already.
+  explainMiss(domainName, body) {
+    const systemHash = sha(systemText(body.system));
+    const history = body.messages.slice(0, lastAssistant(body.messages) + 1);
+    const live = [...this.all].filter((c) => !c.closed && c.domainName === domainName && c.model === body.model);
+    const out = { live: live.length, same_system: live.some((c) => c.systemHash === systemHash) };
+    if (!out.same_system) out.system_changed = live.length > 0;
+    // The rank of a conversation: the same system prompt, then the count of
+    // messages in common, then the block of the difference.
+    const later = (a, b) => {
+      const i = a.findIndex((v, n) => v !== b[n]);
+      return i >= 0 && a[i] > b[i];
+    };
+    let best = null;
+    for (const c of live) {
+      const diff = shapeDiff(c.expected(), history);
+      const rank = [c.systemHash === systemHash ? 1 : 0, diff ? diff.common : Infinity, diff?.block ?? -1];
+      if (!best || later(rank, best.rank)) best = { c, diff, rank };
+    }
+    if (best) Object.assign(out, { closest: best.c.ref, diff: best.diff });
+    return out;
   }
 
   // Room for one more conversation: true, or false when each live
@@ -238,6 +274,8 @@ export class Conversation {
     this.current = null;
     this.parts = new Map();
     this.history = [];
+    // The history that the caller has after the last model call.
+    this.answered = null;
     this.touched = Date.now();
     this.closed = false;
     this.stderrBytes = 0;
@@ -393,6 +431,7 @@ export class Conversation {
     this.current = null;
     message.content = message.content.filter(Boolean);
     const history = [...this.history, { role: "assistant", content: message.content }];
+    this.answered = history;
     this.domain.byHistory.set(historyKeyOfHash(this.model, this.systemHash, history), this);
     if (!this.sink) {
       this.log("orphan_model_call", { domain: this.domainName, conversation: this.ref, model: message.model });
@@ -442,6 +481,11 @@ export class Conversation {
       this.forget(block.tool_use_id);
       call.resolve(result);
     } else call.result = result;
+  }
+
+  // The history that the next call of the caller should start with.
+  expected() {
+    return this.answered ?? this.history;
   }
 
   unanswered() {

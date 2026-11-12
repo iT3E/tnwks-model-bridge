@@ -16,7 +16,7 @@ import time
 import unittest
 import uuid
 
-from harness import GATEWAY_MASTER_KEY, KEYS, UPSTREAM_KEY, Rig, call
+from harness import GATEWAY_MASTER_KEY, KEYS, UPSTREAM_KEY, Pipe, Rig, call
 
 MODEL = "claude-test"
 WEATHER = {
@@ -501,6 +501,149 @@ class BridgeTest(unittest.TestCase):
         refused = [l for l in self.main.log_lines()[before:] if l.get("status") == 401]
         self.assertTrue(refused)
 
+    # ---------------------------------------------------- shutdown, rebuild
+    def wait_for_mock(self, word, timeout=60):
+        """Wait until the call with `word` is at the mock: the engine runs."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.records_with(word):
+                return
+            time.sleep(0.2)
+        self.fail(f"the call did not reach the mock in {timeout} s")
+
+    def drain_lines(self, bridge):
+        return [l for l in bridge.log_lines() if l.get("event") in ("drain_start", "drain_end")]
+
+    def assert_shutdown_error(self, error):
+        self.assertEqual(error["type"], "overloaded_error", error)
+        self.assertIn("service unavailable", error["message"])
+        self.assertIn("try again", error["message"])
+
+    def test_15_sigterm_lets_a_call_in_work_end(self):
+        """SIGTERM during a slow call: the call gets its whole answer, /health
+        stops answering 200, and the bridge exits 0 with nothing cut."""
+        bridge = self.rig.spawn("drain-whole", BRIDGE_DRAIN_SECONDS="40")
+        word = mark("DRAIN-WHOLE")
+        pipe = Pipe(bridge.port)
+        pipe.post(body([user(f"DELAY=5 ECHO={word}")], tools=(), stream=True), KEYS["main"])
+        self.wait_for_mock(word)
+        bridge.terminate()
+        time.sleep(1)
+        try:
+            import http.client
+
+            conn = http.client.HTTPConnection("127.0.0.1", bridge.port, timeout=5)
+            conn.request("GET", "/health")
+            health = conn.getresponse().status
+        except OSError:
+            health = None
+        self.assertNotEqual(health, 200)
+        responses = pipe.responses()
+        self.assertEqual(len(responses), 1)
+        res = responses[0]
+        self.assertEqual(res.status, 200)
+        self.assertEqual([e["type"] for e in res.events if e["type"] == "error"], [])
+        self.assertEqual(res.events[-1]["type"], "message_stop")
+        self.assertIn(f"ECHO-{word}", res.message()["content"][0]["text"])
+        self.assertEqual(bridge.wait_exit(30), 0)
+        lines = self.drain_lines(bridge)
+        self.assertEqual([l["event"] for l in lines], ["drain_start", "drain_end"], lines)
+        self.assertEqual(lines[0]["signal"], "SIGTERM")
+        self.assertEqual(lines[1]["cut"], 0)
+
+    def test_16_a_call_after_sigterm_gets_503(self):
+        """A call that comes after SIGTERM, on a connection that is still
+        open, gets 503 with an error that tells the caller to try again, and
+        /health on it answers 503. The call in work still ends whole."""
+        bridge = self.rig.spawn("drain-refuse", BRIDGE_DRAIN_SECONDS="40")
+        word = mark("DRAIN-FIRST")
+        pipe = Pipe(bridge.port)
+        pipe.post(body([user(f"DELAY=4 ECHO={word}")], tools=()), KEYS["main"])
+        self.wait_for_mock(word)
+        bridge.terminate()
+        time.sleep(1)
+        late = mark("DRAIN-LATE")
+        pipe.get("/health")
+        pipe.post(body([user(f"ECHO={late}")], tools=()), KEYS["main"])
+        first, health, refused = pipe.responses()
+        self.assertEqual(first.status, 200, first.body)
+        self.assertIn(f"ECHO-{word}", first.body["content"][0]["text"])
+        self.assertEqual(health.status, 503)
+        self.assertTrue(health.body["draining"])
+        self.assertEqual(refused.status, 503, refused.body)
+        self.assert_shutdown_error(refused.body["error"])
+        self.assertEqual(self.records_with(late), [])
+        self.assertEqual(bridge.wait_exit(30), 0)
+
+    def test_17_the_drain_deadline_cuts_with_a_retryable_error(self):
+        """At the end of BRIDGE_DRAIN_SECONDS the bridge cuts each call in
+        work: a stream that started gets an error event, a JSON call gets
+        503, both with the error that tells the caller to try again."""
+        bridge = self.rig.spawn("drain-cut", BRIDGE_DRAIN_SECONDS="3")
+        out = {}
+        words = {"stream": mark("CUT-STREAM"), "json": mark("CUT-JSON")}
+
+        def slow(kind):
+            extra = {"stream": True} if kind == "stream" else {}
+            out[kind] = call(
+                bridge.port, body([user(f"DELAY=20 ECHO={words[kind]}")], tools=(), **extra), key=KEYS["main"]
+            )
+
+        threads = [threading.Thread(target=slow, args=(k,)) for k in words]
+        for t in threads:
+            t.start()
+        for w in words.values():
+            self.wait_for_mock(w)
+        started = time.time()
+        bridge.terminate()
+        for t in threads:
+            t.join(timeout=30)
+        self.assertLess(time.time() - started, 12)
+        stream = out["stream"]
+        self.assertEqual(stream.status, 200)
+        self.assertEqual(stream.headers["content-type"], "text/event-stream")
+        self.assertEqual(stream.events[-1]["type"], "error", stream.events)
+        self.assert_shutdown_error(stream.events[-1]["error"])
+        self.assertEqual(out["json"].status, 503, out["json"].body)
+        self.assert_shutdown_error(out["json"].body["error"])
+        self.assertEqual(bridge.wait_exit(30), 0)
+        lines = self.drain_lines(bridge)
+        self.assertEqual(lines[-1]["event"], "drain_end", lines)
+        self.assertEqual(lines[-1]["cut"], 2)
+
+    def test_18_the_reason_of_a_rebuild_is_in_the_log(self):
+        """A call whose history matches no live conversation logs why: here a
+        changed answer text, then a changed system prompt. Positions and
+        kinds only."""
+        s1, s2 = mark("REBUILD-SYSTEM-ONE"), mark("REBUILD-SYSTEM-TWO")
+        start = [user(f"ECHO={mark('REBUILD')}")]
+        first = call(self.main.port, body(start, system=s1, tools=()), key=KEYS["main"])
+        msg = self.ok(first, "new")
+        changed = start + [{"role": "assistant", "content": [{"type": "text", "text": mark("CHANGED")}]}]
+        second = call(self.main.port, body(changed + [user(mark("NEXT"))], system=s1, tools=()), key=KEYS["main"])
+        self.ok(second, "rebuilt")
+        same = start + [{"role": "assistant", "content": msg["content"]}]
+        third = call(self.main.port, body(same + [user(mark("NEXT"))], system=s2, tools=()), key=KEYS["main"])
+        self.ok(third, "rebuilt")
+
+        rebuilds = {l["conversation"]: l for l in self.main.log_lines() if l.get("event") == "rebuild"}
+        allowed = {"ts", "event", "domain", "model", "conversation", "live", "same_system", "system_changed", "closest", "diff", "closed"}
+        line = rebuilds[second.conversation]
+        self.assertEqual(set(line) - allowed, set(), line)
+        self.assertEqual(line["domain"], "main")
+        self.assertTrue(line["same_system"], line)
+        self.assertGreaterEqual(line["live"], 1)
+        self.assertEqual(line["closest"], first.conversation)
+        self.assertEqual(line["diff"], {"message": 1, "block": 0, "kind": "text", "got": "text", "common": 1})
+        self.assertIsNone(line["closed"])
+
+        line = rebuilds[third.conversation]
+        self.assertEqual(set(line) - allowed, set(), line)
+        self.assertFalse(line["same_system"], line)
+        self.assertTrue(line["system_changed"], line)
+        self.assertEqual(line["closest"], first.conversation)
+        self.assertIsNone(line["diff"])
+
     def test_99_no_marker_text_in_the_log(self):
         """The log of each bridge holds no text of a conversation and no key:
         none of the marker texts of the tests above, and no fake key."""
@@ -514,6 +657,12 @@ class BridgeTest(unittest.TestCase):
                 self.assertNotIn(key, log)
             for line in bridge.log_lines():
                 self.assertNotEqual(line.get("event"), "not_json", line)
+        for bridge in self.rig.extras.values():
+            log = bridge.log()
+            for m in self.markers:
+                self.assertNotIn(m, log)
+            for key in [*KEYS.values(), UPSTREAM_KEY]:
+                self.assertNotIn(key, log)
 
 
 if __name__ == "__main__":
