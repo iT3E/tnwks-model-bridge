@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.2.0 - 2026-11-12
+
+### Added
+
+* The model bridge: POST /v1/messages and GET /health, a key for each trust domain in x-api-key, the conversations of each trust domain apart, the history as quoted strings when no engine is live, limits of idle time and of live conversations, and a log with no text of a conversation. Its tests run on the image in CI, with a mock upstream and the model gateway in front
+
 ## v0.1.0 - 2026-11-12
 
 ### Added
