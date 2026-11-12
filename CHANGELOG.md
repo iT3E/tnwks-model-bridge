@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.2.1 - 2026-11-12
+
+### Fixed
+
+* A stop of the pod no longer cuts a call in work. On SIGTERM the bridge drains for up to BRIDGE_DRAIN_SECONDS (default 75): /health answers 503, a new call gets 503 overloaded_error that tells the caller to try again, and the calls in work run to their end. At the deadline it cuts what is left with the same retryable error. A rebuild line in the log now tells why a call with a history matched no live conversation (positions and kinds only)
+
 ## v0.2.0 - 2026-11-12
 
 ### Added
