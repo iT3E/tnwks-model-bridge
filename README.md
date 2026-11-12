@@ -22,6 +22,7 @@ namespace `ai`, pinned as `:<version>@sha256:<digest>`.
 | Trust domains       | `main`, `finance` and `workflows`, with their keys in `BRIDGE_KEY_MAIN`, `BRIDGE_KEY_FINANCE` and `BRIDGE_KEY_WORKFLOWS`. A domain with no key is not served. The bridge does not start with no key, with a key of less than 32 characters, or with two domains on one key |
 | Sign-in of the plan | `CLAUDE_CODE_OAUTH_TOKEN`, a token that `claude setup-token` makes. Only the engine processes get it                                                                                                                                                                       |
 | Limits              | `BRIDGE_MAX_CONVERSATIONS` (default 8) live conversations, `BRIDGE_IDLE_SECONDS` (default 900) with no call before a conversation ends, `BRIDGE_CALL_SECONDS` (default 300) for one model call, `BRIDGE_MAX_BODY_MB` (default 32)                                          |
+| Shutdown            | On SIGTERM, a drain of up to `BRIDGE_DRAIN_SECONDS` (default 75). Set the grace period of the pod above it                                                                                                                                                                 |
 | Writable paths      | `/tmp` only (`BRIDGE_STATE_DIR`, default `/tmp/tnwks-model-bridge`). The root file system can be read-only. The user is 65532                                                                                                                                              |
 | State               | In memory. Nothing is kept on a disk after a conversation ends                                                                                                                                                                                                             |
 
@@ -88,6 +89,15 @@ A gateway entry for a trust domain:
   ends the one that was idle for the longest time. When each live
   conversation has a call in work, the bridge answers 529. A second call
   for a conversation with a call in work gets 409.
+- **Shutdown.** On SIGTERM the bridge drains. `/health` answers 503, the
+  server takes no new connection, and a call that still comes on an open
+  connection gets 503 with `overloaded_error` and the words "service
+  unavailable" and "try again", so a caller tries again on the next pod.
+  The calls in work run to their end. At `BRIDGE_DRAIN_SECONDS` the bridge
+  cuts each call that is left with the same error (an `error` event in a
+  stream that started, else 503), ends each conversation and exits. A call
+  that ended with a tool call is not lost: its result goes to the next pod
+  as a rebuilt conversation.
 
 **What the engine changes in a call.** Before the system prompt of the
 caller it puts a billing line and "You are a Claude agent, built on
@@ -105,7 +115,24 @@ The other lines: `listening`, `engine_init` (the engine version, the count
 of tools, any tool that is not of the caller, the MCP servers, the
 permission mode), `conversation_end` with its reason, `engine_error` with
 its kind, and `orphan_model_call` (a model call of the engine with no call
-of a caller, with its model). The log never holds a text of a
+of a caller, with its model), `drain_start` and `drain_end` (the count of
+calls cut).
+
+A `rebuild` line tells why a call with a history matched no live
+conversation. It changes nothing. Among the live conversations of the
+trust domain and the model (`live`), it takes the closest one (`closest`):
+the same system prompt first (`same_system`), then the longest part in
+common. With no conversation of the same system prompt, `system_changed`
+tells whether a live one had another system prompt. `diff` is the first
+place where the history of the call differs from the history that the
+closest conversation expects: `message` and `block` (indexes in the list of
+the caller), `kind` and `got` (`text`, `tool_use`, `tool_result`, `role`,
+`missing`, `extra` or `none`), and `common` (the count of messages before
+it that are the same); null when they are the same. `closed` is the reason
+when the match found a conversation and ended it (for example
+`tools_changed`). Positions and kinds only.
+
+The log never holds a text of a
 conversation, a header or a key: the test in CI checks it with marker
 texts.
 

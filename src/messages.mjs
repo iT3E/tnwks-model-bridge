@@ -139,26 +139,72 @@ export function lastToolUseIds(messages) {
     .filter(Boolean);
 }
 
+const SHAPE_KINDS = { t: "text", u: "tool_use", r: "tool_result" };
+
+// The parts of the shape below, with the index of each message and block in
+// the list of the caller.
+function shapeEntries(messages) {
+  return messages
+    .map((m, i) => ({
+      i,
+      role: m?.role,
+      blocks: blocksOf(m)
+        .map((b, j) =>
+          b?.type === "text"
+            ? { j, k: "t", v: String(b.text ?? "").trim() }
+            : b?.type === "tool_use"
+              ? { j, k: "u", v: idKey(b.id) }
+              : b?.type === "tool_result"
+                ? { j, k: "r", v: idKey(b.tool_use_id) }
+                : null,
+        )
+        .filter(Boolean),
+    }))
+    .filter((e) => e.blocks.length);
+}
+
 // A conversation in a form that lives through a round trip at the caller:
 // the text, the tool_use ids and the tool_result ids, in order. Thinking and
 // other blocks are left out, since a caller may drop them.
 export function shape(messages) {
-  return messages
-    .map((m) => [
-      m?.role,
-      blocksOf(m)
-        .map((b) =>
-          b?.type === "text"
-            ? ["t", String(b.text ?? "").trim()]
-            : b?.type === "tool_use"
-              ? ["u", idKey(b.id)]
-              : b?.type === "tool_result"
-                ? ["r", idKey(b.tool_use_id)]
-                : null,
-        )
-        .filter(Boolean),
-    ])
-    .filter(([, blocks]) => blocks.length);
+  return shapeEntries(messages).map((e) => [e.role, e.blocks.map((b) => [b.k, b.v])]);
+}
+
+// The first place where the shape of the history of the caller (`got`)
+// differs from the history that a conversation expects, or null when the two
+// are the same. It gives positions and kinds only, never a text or an id:
+// - `message`: the index of the message in the list of the caller (the
+//   length of the list, when the caller has fewer messages);
+// - `block`: the index of the block in that message, or null;
+// - `kind`: the kind of the part that the conversation has there (`text`,
+//   `tool_use` or `tool_result`), `role` for a different role, `missing` for
+//   a message that the caller does not have, or `extra` for a part that the
+//   conversation does not have;
+// - `got`: the kind of the part of the caller there, or `none`;
+// - `common`: the count of messages before it that are the same.
+export function shapeDiff(expected, got) {
+  const a = shapeEntries(expected);
+  const b = shapeEntries(got);
+  for (let n = 0; n < Math.max(a.length, b.length); n++) {
+    const x = a[n];
+    const y = b[n];
+    if (!y) return { message: got.length, block: null, kind: "missing", got: "none", common: n };
+    if (!x) return { message: y.i, block: null, kind: "extra", got: SHAPE_KINDS[y.blocks[0].k], common: n };
+    if (x.role !== y.role) return { message: y.i, block: null, kind: "role", got: "role", common: n };
+    for (let m = 0; m < Math.max(x.blocks.length, y.blocks.length); m++) {
+      const p = x.blocks[m];
+      const q = y.blocks[m];
+      if (p && q && p.k === q.k && p.v === q.v) continue;
+      return {
+        message: y.i,
+        block: q ? q.j : null,
+        kind: p ? SHAPE_KINDS[p.k] : "extra",
+        got: q ? SHAPE_KINDS[q.k] : "none",
+        common: n,
+      };
+    }
+  }
+  return null;
 }
 
 // The key of a conversation inside one trust domain: the model, the system

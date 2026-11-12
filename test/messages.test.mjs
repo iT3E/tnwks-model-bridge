@@ -13,6 +13,7 @@ import {
   lastToolUseIds,
   loadKeys,
   newInput,
+  shapeDiff,
   systemText,
   thinkingOf,
   withoutCacheMarks,
@@ -151,4 +152,81 @@ test("a call that the bridge does not take", () => {
   assert.match(invalidCall({ model: "m", messages: [{ role: "assistant", content: "a" }] }), /last message/);
   assert.match(invalidCall({ model: "m", messages: [{ role: "user", content: "q" }], tools: [{}] }), /name/);
   assert.equal(invalidCall({ model: "m", messages: [{ role: "user", content: "q" }] }), null);
+});
+
+test("the key of a history is the same as in release 0.2.0", () => {
+  const messages = [
+    { role: "user", content: "hi " },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "x" },
+        { type: "text", text: "a" },
+        { type: "tool_use", id: "toolu_01-ab", name: "n", input: {} },
+      ],
+    },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_01-ab", content: "r" }] },
+    { role: "assistant", content: [{ type: "thinking", thinking: "only" }] },
+    { role: "assistant", content: "done" },
+  ];
+  assert.equal(
+    historyKey("claude-test", "sys", messages),
+    "2b1e3732702fc154620edbb79a55fb5ff097d41bd8b5ba5579991ae805c3ae7b",
+  );
+});
+
+test("the first difference of two histories: positions and kinds, no text", () => {
+  const answer = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "t" },
+      { type: "text", text: "secret words" },
+      { type: "tool_use", id: "toolu_1", name: "n", input: {} },
+    ],
+  };
+  const expected = [{ role: "user", content: "question" }, answer];
+  assert.equal(shapeDiff(expected, structuredClone(expected)), null);
+  // A thinking block that the caller drops, and white space, are no difference.
+  const dropped = [
+    { role: "user", content: [{ type: "text", text: " question\n" }] },
+    { role: "assistant", content: answer.content.slice(1) },
+  ];
+  assert.equal(shapeDiff(expected, dropped), null);
+
+  const rewritten = structuredClone(expected);
+  rewritten[1].content[1].text = "other words";
+  assert.deepEqual(shapeDiff(expected, rewritten), { message: 1, block: 1, kind: "text", got: "text", common: 1 });
+
+  const newId = structuredClone(expected);
+  newId[1].content[2].id = "toolu_2";
+  assert.deepEqual(shapeDiff(expected, newId), { message: 1, block: 2, kind: "tool_use", got: "tool_use", common: 1 });
+
+  const noToolUse = structuredClone(expected);
+  noToolUse[1].content.pop();
+  assert.deepEqual(shapeDiff(expected, noToolUse), {
+    message: 1,
+    block: null,
+    kind: "tool_use",
+    got: "none",
+    common: 1,
+  });
+
+  assert.deepEqual(shapeDiff(expected, expected.slice(0, 1)), {
+    message: 1,
+    block: null,
+    kind: "missing",
+    got: "none",
+    common: 1,
+  });
+  const longer = [...expected, { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1" }] }];
+  assert.deepEqual(shapeDiff(expected, longer), {
+    message: 2,
+    block: null,
+    kind: "extra",
+    got: "tool_result",
+    common: 2,
+  });
+  const swapped = [{ role: "assistant", content: "question" }, answer];
+  assert.deepEqual(shapeDiff(expected, swapped), { message: 0, block: null, kind: "role", got: "role", common: 0 });
+  assert.doesNotMatch(JSON.stringify(shapeDiff(expected, rewritten)), /words|toolu/);
 });

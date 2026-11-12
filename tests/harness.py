@@ -73,10 +73,11 @@ def run(cmd, check=True, **kw):
 class Bridge:
     """One bridge under test."""
 
-    def __init__(self, rig, name, max_conversations):
+    def __init__(self, rig, name, max_conversations, extra_env=None):
         self.rig = rig
         self.name = name
         self.max_conversations = max_conversations
+        self.extra_env = dict(extra_env or {})
         self.port = free_port()
         self.state_dir = None
         self.proc = None
@@ -94,6 +95,7 @@ class Bridge:
             "HTTPS_PROXY": DEAD_PROXY,
             "HTTP_PROXY": DEAD_PROXY,
             "NO_PROXY": "mock,127.0.0.1,localhost",
+            **self.extra_env,
         }
 
     def log(self):
@@ -122,6 +124,26 @@ class Bridge:
             return run(["docker", "exec", self.container, "sh", "-c", script], check=False)
         return run(["sh", "-c", script], check=False)
 
+    def terminate(self):
+        """SIGTERM, as the kubelet sends it when it stops the pod."""
+        if self.rig.mode == "container":
+            run(["docker", "kill", "--signal", "TERM", self.container])
+        else:
+            self.proc.send_signal(signal.SIGTERM)
+
+    def wait_exit(self, timeout):
+        """The exit code of the bridge, or None when it still runs."""
+        if self.rig.mode == "container":
+            try:
+                res = run(["docker", "wait", self.container], timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return None
+            return int(res.stdout.strip())
+        try:
+            return self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+
     @property
     def state(self):
         """The state directory of the bridge, as the bridge sees it."""
@@ -137,6 +159,8 @@ class Rig:
         self.mock_port = free_port()
         self.gateway_port = free_port()
         self.bridges = {"main": Bridge(self, "bridge", 8), "small": Bridge(self, "small", 2)}
+        # Bridges that a test starts for itself, such as one that it stops.
+        self.extras = {}
         self.procs = []
         self.containers = []
 
@@ -162,26 +186,40 @@ class Rig:
                 stderr=subprocess.STDOUT,
             )
         )
-        node = shutil.which("node")
         for b in self.bridges.values():
-            b.state_dir = os.path.join(self.work, f"state-{b.name}")
-            b.log_path = os.path.join(self.work, f"{b.name}.log")
-            env = {
-                "PATH": os.path.dirname(node) + ":/usr/bin:/bin",
-                "HOME": os.path.join(self.work, "home"),
-                "BRIDGE_HOST": "127.0.0.1",
-                "BRIDGE_PORT": str(b.port),
-                "BRIDGE_STATE_DIR": b.state_dir,
-                **b.env(f"http://127.0.0.1:{self.mock_port}"),
-            }
-            b.proc = subprocess.Popen(
-                [node, os.path.join(REPO, "src", "bridge.mjs")],
-                env=env,
-                cwd=self.work,
-                stdout=open(b.log_path, "w"),
-                stderr=subprocess.STDOUT,
-            )
-            self.procs.append(b.proc)
+            self._start_bridge_process(b)
+
+    def _start_bridge_process(self, b):
+        node = shutil.which("node")
+        b.state_dir = os.path.join(self.work, f"state-{b.name}")
+        b.log_path = os.path.join(self.work, f"{b.name}.log")
+        env = {
+            "PATH": os.path.dirname(node) + ":/usr/bin:/bin",
+            "HOME": os.path.join(self.work, "home"),
+            "BRIDGE_HOST": "127.0.0.1",
+            "BRIDGE_PORT": str(b.port),
+            "BRIDGE_STATE_DIR": b.state_dir,
+            **b.env(f"http://127.0.0.1:{self.mock_port}"),
+        }
+        b.proc = subprocess.Popen(
+            [node, os.path.join(REPO, "src", "bridge.mjs")],
+            env=env,
+            cwd=self.work,
+            stdout=open(b.log_path, "w"),
+            stderr=subprocess.STDOUT,
+        )
+        self.procs.append(b.proc)
+
+    def spawn(self, name, max_conversations=4, **env):
+        """One more bridge, of the same image or source, for one test."""
+        b = Bridge(self, name, max_conversations, env)
+        self.extras[name] = b
+        if self.mode == "container":
+            self._start_bridge_container(b)
+        else:
+            self._start_bridge_process(b)
+        wait_http(b.port)
+        return b
 
     def _start_containers(self):
         net = self.prefix
@@ -194,24 +232,7 @@ class Rig:
             mock_image,
         )
         for b in self.bridges.values():
-            args = [
-                "--network-alias",
-                b.name,
-                "-p",
-                f"127.0.0.1:{b.port}:8080",
-                "--read-only",
-                "--tmpfs",
-                "/tmp:rw,nosuid,nodev,size=512m,mode=1777",
-                "--cap-drop",
-                "ALL",
-                "--security-opt",
-                "no-new-privileges",
-                "-e",
-                "BRIDGE_HOST=0.0.0.0",
-            ]
-            for k, v in b.env("http://mock:8000").items():
-                args += ["-e", f"{k}={v}"]
-            self._container(b.name, args, self.image)
+            self._start_bridge_container(b)
         gateway_image = f"{self.prefix}-gateway:test"
         run(["docker", "build", "-q", "-t", gateway_image, os.path.join(TESTS, "model-gateway")])
         self._container(
@@ -227,6 +248,26 @@ class Rig:
             gateway_image,
             ["--config", "/config/config.yaml", "--port", "4000"],
         )
+
+    def _start_bridge_container(self, b):
+        args = [
+            "--network-alias",
+            b.name,
+            "-p",
+            f"127.0.0.1:{b.port}:8080",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,size=512m,mode=1777",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "-e",
+            "BRIDGE_HOST=0.0.0.0",
+        ]
+        for k, v in b.env("http://mock:8000").items():
+            args += ["-e", f"{k}={v}"]
+        self._container(b.name, args, self.image)
 
     def _container(self, name, args, image, cmd=()):
         full = f"{self.prefix}-{name}"
@@ -250,7 +291,7 @@ class Rig:
 
     def dump(self, out=sys.stderr):
         """The logs, for a failed run. They hold fake values only."""
-        for b in self.bridges.values():
+        for b in [*self.bridges.values(), *self.extras.values()]:
             print(f"==== the log of {b.name}", file=out)
             print(b.log()[-20000:], file=out)
         if self.mode == "container":
@@ -326,6 +367,65 @@ def call(port, body, key=None, headers=None, timeout=120):
     raw = res.read().decode("utf-8", errors="replace")
     hdrs = {k.lower(): v for k, v in res.getheaders()}
     conn.close()
+    return parsed(res.status, hdrs, raw)
+
+
+class Pipe:
+    """One connection that sends requests one after the other, with no wait
+    for an answer (HTTP/1.1 pipelining), and reads all answers at the end.
+    With it a test can send a call on a connection that is open when the
+    bridge gets SIGTERM."""
+
+    def __init__(self, port, timeout=120):
+        self.sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+
+    def post(self, body, key):
+        data = json.dumps(body).encode()
+        head = (
+            "POST /v1/messages HTTP/1.1\r\nHost: bridge\r\ncontent-type: application/json\r\n"
+            f"anthropic-version: 2023-06-01\r\nx-api-key: {key}\r\ncontent-length: {len(data)}\r\n\r\n"
+        )
+        self.sock.sendall(head.encode() + data)
+
+    def get(self, path):
+        self.sock.sendall(f"GET {path} HTTP/1.1\r\nHost: bridge\r\n\r\n".encode())
+
+    def responses(self):
+        """Each answer, after the bridge closed the connection."""
+        data = b""
+        while True:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        self.sock.close()
+        out = []
+        while data:
+            head, _, rest = data.partition(b"\r\n\r\n")
+            lines = head.decode("latin-1").split("\r\n")
+            status = int(lines[0].split()[1])
+            hdrs = {k.strip().lower(): v.strip() for k, v in (l.split(":", 1) for l in lines[1:] if ":" in l)}
+            if "content-length" in hdrs:
+                n = int(hdrs["content-length"])
+                raw, data = rest[:n], rest[n:]
+            elif hdrs.get("transfer-encoding") == "chunked":
+                raw = b""
+                while True:
+                    size_line, _, rest = rest.partition(b"\r\n")
+                    size = int(size_line.split(b";")[0] or b"0", 16)
+                    if size == 0:
+                        rest = rest[2:]
+                        break
+                    raw += rest[:size]
+                    rest = rest[size + 2 :]
+                data = rest
+            else:
+                raw, data = rest, b""
+            out.append(parsed(status, hdrs, raw.decode("utf-8", errors="replace")))
+        return out
+
+
+def parsed(status, hdrs, raw):
     events = []
     data = None
     if hdrs.get("content-type", "").startswith("text/event-stream"):
@@ -338,4 +438,4 @@ def call(port, body, key=None, headers=None, timeout=120):
             data = json.loads(raw)
         except ValueError:
             data = {"raw": raw}
-    return Response(res.status, hdrs, data, events)
+    return Response(status, hdrs, data, events)
