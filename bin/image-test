@@ -4,10 +4,12 @@
 #
 # Usage: bin/image-test <image ref>
 #
-# It checks that the image runs with a read-only root file system as a user
-# that is not root, and that it holds the SDK at the release of the lock
-# file. In CI only: never on a workstation that runs a live cluster in
-# Docker. The tests of the service come with the service.
+# It runs tests/test_bridge.py in container mode: two containers of the
+# image with a read-only root file system, a mock upstream and a model
+# gateway, on a Docker network of their own. The values are fake. In CI
+# only: never on a workstation that runs a live cluster in Docker. On a
+# workstation, `cd tests && python3 -m unittest -v test_bridge` runs the
+# same tests on the source, with processes on the loopback address.
 set -euo pipefail
 
 image="${1:?usage: bin/image-test <image ref>}"
@@ -18,19 +20,7 @@ if [[ "${CI:-}" != "true" ]]; then
   exit 1
 fi
 
-want="$(node -p "require('$repo/package-lock.json').packages['node_modules/@anthropic-ai/claude-agent-sdk'].version")"
-out="$(docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges "$image" \
-  node --input-type=module -e "
-    import { readFileSync } from 'node:fs';
-    import { loadKeys } from '/app/src/messages.mjs';
-    const sdk = JSON.parse(readFileSync('/app/node_modules/@anthropic-ai/claude-agent-sdk/package.json', 'utf8'));
-    loadKeys({ BRIDGE_KEY_MAIN: 'x'.repeat(32) });
-    console.log(process.getuid() + ' ' + sdk.version);
-  ")"
-echo "image: uid and SDK: $out"
-[[ "$out" == "65532 $want" ]] || { echo "want: 65532 $want" >&2; exit 1; }
-if docker run --rm --read-only "$image" touch /app/x 2>/dev/null; then
-  echo "the root file system is writable" >&2
-  exit 1
-fi
-echo "image test: ok"
+export IMAGE_REF="$image"
+export PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+cd "$repo/tests"
+python3 -m unittest -v test_bridge

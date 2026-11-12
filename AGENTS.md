@@ -14,8 +14,9 @@ deploys it from `kubernetes/apps/ai/model-bridge/`. `README.md` has the
 contract. The design is effort 0003 in tnwks-coe (Design Doc 4.2.4,
 ADR-018).
 
-- `src/messages.mjs` holds the pure parts (unit tests in `test/`). The
-  service comes in the next change.
+- `src/bridge.mjs` is the HTTP service, `src/conversation.mjs` the engine
+  processes and their registry, `src/messages.mjs` the pure parts (unit
+  tests in `test/`).
 - The SDK and its peers are pinned exactly in `package.json` and the lock
   file. Check each engine option against the type file (`sdk.d.ts`) of the
   pinned release before you change it.
@@ -23,9 +24,10 @@ ADR-018).
   imitates Claude Code, nothing removed from a prompt. The bridge names
   itself only with `CLAUDE_AGENT_SDK_CLIENT_APP`.
 - The log never holds a text of a conversation, a header or a key.
-- The image test (`bin/image-test`) runs in CI only. Do not run
+- The image test (`bin/image-test`, `tests/`) runs in CI only. Do not run
   `task test` or a container on a workstation that runs a live cluster in
-  Docker.
+  Docker; run `cd tests && python3 -m unittest -v test_bridge` instead,
+  which uses processes on the loopback address and a mock upstream.
 - No real credential in a test, a file or a log. The tests use fake values.
 
 ## Change workflow
