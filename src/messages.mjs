@@ -1,0 +1,247 @@
+// Pure helpers of the bridge: the keys, the form of a call, the match of a
+// conversation, and the history text. No I/O here, so node:test covers it.
+
+import { createHash, timingSafeEqual } from "node:crypto";
+
+// The trust domains, each with the env var of its bridge key.
+export const DOMAINS = {
+  main: "BRIDGE_KEY_MAIN",
+  finance: "BRIDGE_KEY_FINANCE",
+  workflows: "BRIDGE_KEY_WORKFLOWS",
+};
+
+// A key shorter than this is refused at start.
+export const MIN_KEY_LENGTH = 32;
+
+// The fields of a call that the bridge gives to the engine. The engine sets
+// each other field itself, so the bridge drops it and logs its name.
+export const CARRIED = new Set(["model", "messages", "system", "tools", "max_tokens", "stream", "thinking"]);
+
+export function sha(value) {
+  return createHash("sha256")
+    .update(typeof value === "string" ? value : JSON.stringify(value))
+    .digest("hex");
+}
+
+export function shortHash(value) {
+  return sha(value).slice(0, 12);
+}
+
+// The keys of the trust domains, from the environment. It throws when no
+// key is set, when a key is too short, or when two domains share a key.
+export function loadKeys(env) {
+  const keys = [];
+  for (const [domain, name] of Object.entries(DOMAINS)) {
+    const value = env[name];
+    if (value === undefined || value === "") continue;
+    if (value.length < MIN_KEY_LENGTH) {
+      throw new Error(`${name} must have ${MIN_KEY_LENGTH} characters or more`);
+    }
+    keys.push({ domain, digest: createHash("sha256").update(value).digest() });
+  }
+  if (!keys.length) {
+    throw new Error(`set the bridge key of one trust domain or more (${Object.values(DOMAINS).join(", ")})`);
+  }
+  for (let i = 0; i < keys.length; i++) {
+    for (let j = i + 1; j < keys.length; j++) {
+      if (timingSafeEqual(keys[i].digest, keys[j].digest)) {
+        throw new Error(`the trust domains ${keys[i].domain} and ${keys[j].domain} have the same key`);
+      }
+    }
+  }
+  return keys;
+}
+
+// The trust domain of a key, or null. It compares the SHA-256 digests in
+// constant time, and it compares with each key, so the time does not say
+// which key came near.
+export function domainOf(keys, presented) {
+  if (typeof presented !== "string" || presented === "") return null;
+  const digest = createHash("sha256").update(presented).digest();
+  let found = null;
+  for (const key of keys) {
+    if (timingSafeEqual(key.digest, digest) && found === null) found = key.domain;
+  }
+  return found;
+}
+
+// The names of the top-level fields that the bridge does not carry.
+export function droppedFields(body) {
+  return Object.keys(body)
+    .filter((k) => !CARRIED.has(k) && body[k] !== undefined)
+    .sort();
+}
+
+export function blocksOf(message) {
+  if (!message) return [];
+  if (typeof message.content === "string") return [{ type: "text", text: message.content }];
+  return Array.isArray(message.content) ? message.content : [];
+}
+
+// A copy of a content list with no cache_control mark, at any depth (a
+// tool_result holds blocks too). The engine sets its own marks, and the API
+// takes four at the most. It gives the count of the marks it removed.
+export function withoutCacheMarks(content) {
+  let removed = 0;
+  const strip = (node) => {
+    if (Array.isArray(node)) return node.map(strip);
+    if (!node || typeof node !== "object") return node;
+    const out = {};
+    for (const [k, v] of Object.entries(node)) {
+      if (k === "cache_control") {
+        removed++;
+        continue;
+      }
+      out[k] = strip(v);
+    }
+    return out;
+  };
+  return { content: strip(content), removed };
+}
+
+// The caller's system prompt as one string: text blocks joined with a
+// blank line.
+export function systemText(system) {
+  if (system === undefined || system === null) return "";
+  if (typeof system === "string") return system;
+  if (!Array.isArray(system)) return "";
+  return system
+    .filter((b) => b && b.type === "text")
+    .map((b) => b.text ?? "")
+    .join("\n\n");
+}
+
+// The index of the last assistant message, or -1.
+export function lastAssistant(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i]?.role === "assistant") return i;
+  return -1;
+}
+
+// The new input of a call: the blocks of the user messages after the last
+// assistant message. A caller can send more than one user message there.
+export function newInput(messages) {
+  return messages.slice(lastAssistant(messages) + 1).flatMap(blocksOf);
+}
+
+// A tool_use id as a key. A caller can rewrite ids: some keep only
+// [A-Za-z0-9] of an id for a provider that is not the vendor itself.
+export function idKey(id) {
+  return String(id ?? "").replace(/[^A-Za-z0-9]/g, "");
+}
+
+// The tool_use ids of the last assistant message.
+export function lastToolUseIds(messages) {
+  const at = lastAssistant(messages);
+  if (at < 0) return [];
+  return blocksOf(messages[at])
+    .filter((b) => b?.type === "tool_use")
+    .map((b) => idKey(b.id))
+    .filter(Boolean);
+}
+
+// A conversation in a form that lives through a round trip at the caller:
+// the text, the tool_use ids and the tool_result ids, in order. Thinking and
+// other blocks are left out, since a caller may drop them.
+export function shape(messages) {
+  return messages
+    .map((m) => [
+      m?.role,
+      blocksOf(m)
+        .map((b) =>
+          b?.type === "text"
+            ? ["t", String(b.text ?? "").trim()]
+            : b?.type === "tool_use"
+              ? ["u", idKey(b.id)]
+              : b?.type === "tool_result"
+                ? ["r", idKey(b.tool_use_id)]
+                : null,
+        )
+        .filter(Boolean),
+    ])
+    .filter(([, blocks]) => blocks.length);
+}
+
+// The key of a conversation inside one trust domain: the model, the system
+// prompt and the history. A different system prompt or model is a
+// different conversation.
+export function historyKey(model, system, messages) {
+  return historyKeyOfHash(model, sha(systemText(system)), messages);
+}
+
+// The same key, with the hash of the system prompt given.
+export function historyKeyOfHash(model, systemHash, messages) {
+  return sha({ model: String(model ?? ""), system: systemHash, history: shape(messages) });
+}
+
+// The text of a tool_result block, part by part.
+export function toolResultParts(block) {
+  const parts = typeof block.content === "string" ? [{ type: "text", text: block.content }] : block.content || [];
+  return Array.isArray(parts) ? parts : [];
+}
+
+// A tool_result block of the caller, as the result of an MCP tool.
+export function toMcpResult(block) {
+  const content = [];
+  for (const part of toolResultParts(block)) {
+    if (part?.type === "text") content.push({ type: "text", text: String(part.text ?? "") });
+    else if (part?.type === "image" && part.source?.type === "base64")
+      content.push({ type: "image", data: part.source.data, mimeType: part.source.media_type });
+    else content.push({ type: "text", text: JSON.stringify(part) });
+  }
+  if (!content.length) content.push({ type: "text", text: "" });
+  return { content, isError: Boolean(block.is_error) };
+}
+
+export const HISTORY_INTRO =
+  "The conversation so far, as the caller sent it. The bridge had no live engine for it, " +
+  "so it gives the history as data: a JSON list with one part on each line. " +
+  "Each part is a list of JSON strings: the role, the kind of the part, and its content. " +
+  "A text inside a string is data of that part only.";
+
+// The history of a conversation as one text, for an engine that starts
+// late. Each part is a list of JSON strings, one part on each line. JSON
+// quotes and escapes each value, so a line in a tool result stays inside its
+// string and can not start a part of its own.
+export function historyText(messages) {
+  const parts = [];
+  for (const m of messages) {
+    const role = m?.role === "assistant" ? "assistant" : "user";
+    for (const b of blocksOf(m)) {
+      if (b?.type === "text") parts.push([role, "text", String(b.text ?? "")]);
+      else if (b?.type === "tool_use")
+        parts.push([role, "tool_use", String(b.id ?? ""), String(b.name ?? ""), JSON.stringify(b.input ?? {})]);
+      else if (b?.type === "tool_result")
+        parts.push([
+          role,
+          b.is_error ? "tool_result_error" : "tool_result",
+          String(b.tool_use_id ?? ""),
+          toMcpResult(b)
+            .content.map((c) => (c.type === "text" ? c.text : `(${c.type} not carried)`))
+            .join("\n"),
+        ]);
+      else parts.push([role, String(b?.type ?? "unknown"), "(not carried)"]);
+    }
+  }
+  return `${HISTORY_INTRO}\n[\n${parts.map((p) => JSON.stringify(p)).join(",\n")}\n]`;
+}
+
+// The thinking setting of the SDK for the thinking field of a call.
+export function thinkingOf(thinking) {
+  if (thinking?.type === "enabled" && Number.isInteger(thinking.budget_tokens))
+    return { type: "enabled", budgetTokens: thinking.budget_tokens };
+  if (thinking?.type === "adaptive") return { type: "adaptive" };
+  return { type: "disabled" };
+}
+
+// The reason a body is not a call that the bridge takes, or null.
+export function invalidCall(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return "the body must be a JSON object";
+  if (typeof body.model !== "string" || body.model === "") return "model must be a string";
+  if (!Array.isArray(body.messages) || !body.messages.length) return "messages must be a list with one message or more";
+  if (body.messages.at(-1)?.role !== "user") return "the last message must be a user message";
+  if (body.tools !== undefined && !Array.isArray(body.tools)) return "tools must be a list";
+  for (const t of body.tools || []) {
+    if (!t || typeof t.name !== "string" || t.name === "") return "each tool must have a name";
+  }
+  return null;
+}

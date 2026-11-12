@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.angular/
+*.tsbuildinfo
+.env
+.env.*
+*.log
+__pycache__/

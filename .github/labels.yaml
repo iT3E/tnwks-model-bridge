@@ -1,0 +1,58 @@
+---
+# Synced to the repo by .github/workflows/meta-sync-labels.yaml (labels not
+# listed here are deleted). Same scheme as tnwks-ops' .github/labels.yaml.
+# Area: names must match .github/labeler.yaml
+- name: area/docker
+  color: "72ccf3"
+  description: >-
+    Changes to the Dockerfile or entrypoint
+- name: area/docs
+  color: "72ccf3"
+  description: >-
+    Changes to Markdown docs
+- name: area/github
+  color: "72ccf3"
+  description: >-
+    Changes made in the .github directory
+- name: area/node
+  color: "72ccf3"
+  description: >-
+    Changes to Node code, packages or build config
+# Renovate (tnwks-ops .github/renovate/labels.json5, plus the language and
+# template labels from the iT3E/github-workflows renovate/ presets)
+- name: renovate/container
+  color: "ffc300"
+- name: renovate/github-action
+  color: "ffc300"
+- name: renovate/github-release
+  color: "ffc300"
+- name: renovate/node
+  color: "ffc300"
+- name: renovate/template
+  color: "ffc300"
+  description: "app-repo-template update (copier update)"
+# Semantic Type
+- name: type/patch
+  color: "FFEC19"
+- name: type/minor
+  color: "FF9800"
+- name: type/major
+  color: "F6412D"
+- name: type/break
+  color: "F6412D"
+# Uncategorized
+- name: bug
+  color: "ee0701"
+- name: do-not-merge
+  color: "ee0701"
+- name: docs
+  color: "F4D1B7"
+  # Renames GitHub's default label, keeping it on the old issues that use it
+  aliases: ["documentation"]
+- name: enhancement
+  color: "84b6eb"
+- name: question
+  color: "cc317c"
+- name: skip-changelog
+  color: "c5def5"
+  description: "No Changie fragment needed (docs, CI-only, chores)"

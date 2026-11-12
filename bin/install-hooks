@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Install this clone's git hooks from .pre-commit-config.yaml (pre-commit and
+# commit-msg: betterleaks, privacy-check, the formatter), then check that the
+# privacy denylist loads, since the hooks refuse every commit without it.
+#
+#   bin/install-hooks      (or: task precommit:init)
+#
+# Needs pre-commit (brew install pre-commit) and, unless PRIVACY_TERMS is
+# exported, sops plus a tnwks-ops checkout at ../tnwks-ops or $TNWKS_OPS_DIR.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+command -v pre-commit >/dev/null || { echo "install-hooks: pre-commit not found (brew install pre-commit)" >&2; exit 1; }
+
+pre-commit install --install-hooks
+
+if bin/privacy-check --text </dev/null >/dev/null; then
+  echo "install-hooks: done; the privacy denylist loads"
+else
+  echo "install-hooks: hooks installed, but bin/privacy-check can't load the denylist (see its error above); commits will fail until it can" >&2
+  exit 1
+fi

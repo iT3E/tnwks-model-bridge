@@ -1,0 +1,20 @@
+# betterleaks config, same as tnwks-ops' .betterleaks.toml. Extends the
+# upstream default rules.
+# Run locally: task precommit:run   (or: betterleaks git --staged)
+title = "app repo"
+
+[extend]
+useDefault = true
+
+# The default rules catch KEY=value secrets but not a credential written as
+# prose in a doc, e.g. "the API token for `example.us`: `3f9a...`". The
+# secret must be a backticked hex/base64-looking token (no `_`, `-` or `.`,
+# which rules out paths and identifiers) within two lines of the keyword.
+[[rules]]
+id = "prose-credential"
+description = "Credential pasted into documentation next to a secret-ish word"
+regex = '''(?i)\b(?:password|passwd|secret|token|api[ _-]?key|credential)s?\b[^\n]{0,100}(?:\n[^\n]{0,100})?`([A-Za-z0-9+/=]{24,})`'''
+secretGroup = 1
+entropy = 3.5
+path = '''\.(?:md|mmd|d2|puml|txt|rst|adoc)$'''
+keywords = ["password", "passwd", "secret", "token", "api key", "api_key", "apikey", "credential"]

@@ -1,0 +1,55 @@
+---
+name: "Release"
+
+# Managed by Copier from https://github.com/iT3E/app-repo-template (see
+# .copier-answers.yml). The logic is in the reusable workflow it calls, from
+# https://github.com/iT3E/github-workflows. The template pins that release
+# (@<sha> # vX.Y.Z), and a template release moves it here as a
+# `copier update` PR.
+#
+# Cuts a release from the Changie fragments a merged PR added: batch them
+# into .changes/<version>.md and CHANGELOG.md, commit, tag vX.Y.Z, publish a
+# GitHub Release, then dispatch build.yaml on the tag (a tag pushed
+# with GITHUB_TOKEN triggers nothing) so the tag's image is built.
+# Runs on every push to main, and on demand to override the bump.
+#
+# Renovate PRs carry no fragment. When one changed what goes into the image
+# (dependencies, the Dockerfile, code: anything but docs, .github/ and the
+# repo tooling this template manages), auto-fragment adds a Fixed
+# "Dependency updates" fragment and it releases a patch by itself, so the
+# update reaches the deploy repo. A template update or a CI-only bump
+# releases nothing, and a person's PR still brings its own fragment. The
+# reusable workflow decides, in seconds, so every push runs it.
+# GitHub Free has no rulesets on private repos, so GITHUB_TOKEN can push the
+# release commit.
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (auto follows the fragment kinds)"
+        type: choice
+        default: auto
+        options: [auto, patch, minor, major]
+
+permissions: {}
+
+# One release at a time, in merge order.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release
+    permissions:
+      # push the release commit and tag, create the GitHub Release
+      contents: write
+      # dispatch build.yaml on the tag
+      actions: write
+    uses: iT3E/github-workflows/.github/workflows/release.yaml@4968e2ea41429e3b8e9b1e77f41d222a5ea01436 # v1.8.1
+    with:
+      bump: ${{ inputs.bump || 'auto' }}
+      build-workflow: "build.yaml"
+      auto-fragment: "Dependency updates"

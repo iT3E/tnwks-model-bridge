@@ -1,0 +1,30 @@
+{
+  "name": "tnwks-model-bridge",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A Messages API service that runs each conversation through the Claude Agent SDK, behind the model gateway.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "src/bridge.mjs",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/bridge.mjs",
+    "lint": "eslint .",
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "build": "node --check src/bridge.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.322",
+    "@anthropic-ai/sdk": "1.8.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.14.0",
+    "globals": "17.14.0",
+    "prettier": "3.10.0"
+  }
+}
