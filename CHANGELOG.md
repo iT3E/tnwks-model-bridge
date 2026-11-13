@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.2.2 - 2026-11-13
+
+### Fixed
+
+* The effort of a call now reaches the engine: output_config.effort goes to the SDK effort option, and a later call with another effort changes it from the next user turn. The display of thinking (summarized or omitted) goes through. Other output_config keys are still dropped, and the log names each one as output_config.<key>. The call line of the log has the effort
+
 ## v0.2.1 - 2026-11-12
 
 ### Fixed
