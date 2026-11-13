@@ -80,8 +80,17 @@ A gateway entry for a trust domain:
 - **What it does not carry.** The engine sets its own cache marks, and the
   API takes four at the most, so the bridge removes the marks of the caller.
   It drops each top-level field but `model`, `messages`, `system`, `tools`,
-  `max_tokens`, `stream` and `thinking` (for example `temperature`,
-  `tool_choice`, `metadata`), and the log names them.
+  `max_tokens`, `stream`, `thinking` and `output_config` (for example
+  `temperature`, `tool_choice`, `metadata`), and the log names them.
+- **Thinking and effort.** `thinking` goes to the SDK option of the same
+  name, with its `display` (`summarized` or `omitted`; another display is
+  dropped as `thinking.display`). `output_config.effort` (`low`, `medium`,
+  `high`, `xhigh` or `max`) goes to the SDK `effort` option when the engine
+  starts. A later call with another effort changes it with
+  `applyFlagSettings`, and the engine uses it from its next user turn: a
+  change inside a tool round waits for the next turn. Each other key of
+  `output_config` (for example `format`) is dropped, and the log names it
+  as `output_config.<key>`.
 - **The name.** The bridge names itself to the vendor with the documented
   `CLAUDE_AGENT_SDK_CLIENT_APP` (`tnwks-model-bridge/<version>`). It adds no
   header and no prompt text, and removes nothing from a prompt.
@@ -109,7 +118,8 @@ environment, the model and the date, and its own `metadata` and
 
 One JSON line on standard output for each call: `domain`, `model`,
 `conversation` (a short hash of a random id), `mode` (`new`, `matched` or
-`rebuilt`), `status`, `ms`, `dropped` (field names) and
+`rebuilt`), `effort` (the effort of the call, or null), `status`, `ms`,
+`dropped` (field names) and
 `cache_marks_removed`. A refused call (401) has `status` and `ms` only.
 The other lines: `listening`, `engine_init` (the engine version, the count
 of tools, any tool that is not of the caller, the MCP servers, the

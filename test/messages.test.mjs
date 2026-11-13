@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   domainOf,
   droppedFields,
+  effortOf,
   historyKey,
   historyText,
   HISTORY_INTRO,
@@ -143,6 +144,16 @@ test("the thinking setting of the SDK", () => {
   assert.deepEqual(thinkingOf(undefined), { type: "disabled" });
   assert.deepEqual(thinkingOf({ type: "enabled", budget_tokens: 2048 }), { type: "enabled", budgetTokens: 2048 });
   assert.deepEqual(thinkingOf({ type: "adaptive" }), { type: "adaptive" });
+  assert.deepEqual(thinkingOf({ type: "adaptive", display: "summarized" }), {
+    type: "adaptive",
+    display: "summarized",
+  });
+  assert.deepEqual(thinkingOf({ type: "enabled", budget_tokens: 1024, display: "omitted" }), {
+    type: "enabled",
+    budgetTokens: 1024,
+    display: "omitted",
+  });
+  assert.deepEqual(thinkingOf({ type: "adaptive", display: "updates" }), { type: "adaptive" });
 });
 
 test("a call that the bridge does not take", () => {
@@ -229,4 +240,18 @@ test("the first difference of two histories: positions and kinds, no text", () =
   const swapped = [{ role: "assistant", content: "question" }, answer];
   assert.deepEqual(shapeDiff(expected, swapped), { message: 0, block: null, kind: "role", got: "role", common: 0 });
   assert.doesNotMatch(JSON.stringify(shapeDiff(expected, rewritten)), /words|toolu/);
+});
+
+test("the effort of a call goes to the engine; the other output_config keys are dropped by name", () => {
+  const body = { model: "m", messages: [], output_config: { effort: "medium", format: { type: "json_schema" } } };
+  assert.equal(effortOf(body), "medium");
+  assert.deepEqual(droppedFields(body), ["output_config.format"]);
+  for (const effort of ["low", "high", "xhigh", "max"]) assert.equal(effortOf({ output_config: { effort } }), effort);
+  assert.equal(effortOf({ model: "m" }), null);
+  assert.equal(effortOf({ output_config: { effort: "extreme" } }), null);
+  assert.deepEqual(droppedFields({ output_config: { effort: "extreme" } }), ["output_config.effort"]);
+  assert.deepEqual(droppedFields({ output_config: { effort: "low" } }), []);
+  assert.deepEqual(droppedFields({ output_config: "x" }), ["output_config"]);
+  assert.deepEqual(droppedFields({ thinking: { type: "adaptive", display: "updates" } }), ["thinking.display"]);
+  assert.deepEqual(droppedFields({ thinking: { type: "adaptive", display: "summarized" } }), []);
 });

@@ -14,8 +14,21 @@ export const DOMAINS = {
 export const MIN_KEY_LENGTH = 32;
 
 // The fields of a call that the bridge gives to the engine. The engine sets
-// each other field itself, so the bridge drops it and logs its name.
-export const CARRIED = new Set(["model", "messages", "system", "tools", "max_tokens", "stream", "thinking"]);
+// each other field itself, so the bridge drops it and logs its name. Of
+// `output_config` it carries `effort` only.
+export const CARRIED = new Set([
+  "model",
+  "messages",
+  "system",
+  "tools",
+  "max_tokens",
+  "stream",
+  "thinking",
+  "output_config",
+]);
+
+// The effort levels of the SDK (its `EffortLevel`).
+export const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 export function sha(value) {
   return createHash("sha256")
@@ -66,10 +79,28 @@ export function domainOf(keys, presented) {
 }
 
 // The names of the top-level fields that the bridge does not carry.
+// The names of the fields that the bridge does not carry: top-level fields,
+// and each key of `output_config` but a valid `effort` (as
+// `output_config.<key>`).
 export function droppedFields(body) {
-  return Object.keys(body)
-    .filter((k) => !CARRIED.has(k) && body[k] !== undefined)
-    .sort();
+  const dropped = Object.keys(body).filter((k) => !CARRIED.has(k) && body[k] !== undefined);
+  const config = body.output_config;
+  if (config !== undefined && config !== null) {
+    if (typeof config !== "object" || Array.isArray(config)) dropped.push("output_config");
+    else
+      for (const key of Object.keys(config))
+        if (key !== "effort" || effortOf(body) === null) dropped.push(`output_config.${key}`);
+  }
+  const display = body.thinking?.display;
+  if (display !== undefined && display !== "summarized" && display !== "omitted") dropped.push("thinking.display");
+  return dropped.sort();
+}
+
+// The effort of a call (`output_config.effort`), or null when it has none or
+// the SDK does not know the level.
+export function effortOf(body) {
+  const effort = body?.output_config?.effort;
+  return typeof effort === "string" && EFFORT_LEVELS.has(effort) ? effort : null;
 }
 
 export function blocksOf(message) {
@@ -271,11 +302,14 @@ export function historyText(messages) {
   return `${HISTORY_INTRO}\n[\n${parts.map((p) => JSON.stringify(p)).join(",\n")}\n]`;
 }
 
-// The thinking setting of the SDK for the thinking field of a call.
+// The thinking setting of the SDK for the thinking field of a call, with
+// its `display` when the SDK knows the value.
 export function thinkingOf(thinking) {
+  const display =
+    thinking?.display === "summarized" || thinking?.display === "omitted" ? { display: thinking.display } : {};
   if (thinking?.type === "enabled" && Number.isInteger(thinking.budget_tokens))
-    return { type: "enabled", budgetTokens: thinking.budget_tokens };
-  if (thinking?.type === "adaptive") return { type: "adaptive" };
+    return { type: "enabled", budgetTokens: thinking.budget_tokens, ...display };
+  if (thinking?.type === "adaptive") return { type: "adaptive", ...display };
   return { type: "disabled" };
 }
 

@@ -9,6 +9,7 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
+  effortOf,
   historyKey,
   historyKeyOfHash,
   historyText,
@@ -268,6 +269,9 @@ export class Conversation {
     // The tools of the caller that an engine can carry: those with a schema.
     this.tools = (body.tools || []).filter((t) => t.type === undefined || t.type === "custom");
     this.toolNames = new Set((body.tools || []).map((t) => t.name));
+    // The effort of the caller (output_config.effort), or null for the
+    // default effort of the model.
+    this.effort = effortOf(body);
     this.inbox = new Inbox();
     this.sink = null;
     this.calls = new Map(); // tool_use id key -> { name, resolve, result, handled }
@@ -332,6 +336,7 @@ export class Conversation {
         includePartialMessages: true,
         verbatimPrompts: true,
         thinking: thinkingOf(body.thinking),
+        ...(this.effort ? { effort: this.effort } : {}),
         cwd: registry.workDir,
         env,
         stderr: (data) => {
@@ -517,9 +522,26 @@ export class Conversation {
     this.push([{ type: "text", text: historyText(past) }, ...carried]);
   }
 
-  // A later call of the conversation.
-  next(body) {
+  // A later call with another effort: the engine takes it for the next
+  // model call. Null goes back to the default effort of the model.
+  setEffort(effort) {
+    if (effort === this.effort) return Promise.resolve();
+    this.effort = effort;
+    return this.query.applyFlagSettings({ effortLevel: effort }).catch((error) => {
+      this.log("engine_error", {
+        domain: this.domainName,
+        conversation: this.ref,
+        kind: `effort:${error?.name || "Error"}`,
+      });
+    });
+  }
+
+  // A later call of the conversation. A new effort is set before the input
+  // goes in, so the next model call has it.
+  async next(body) {
     this.history = body.messages;
+    await this.setEffort(effortOf(body));
+    if (this.closed) return;
     const input = newInput(body.messages);
     const results = input.filter((b) => b?.type === "tool_result");
     const other = input.filter((b) => b?.type !== "tool_result");

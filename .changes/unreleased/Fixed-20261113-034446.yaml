@@ -1,0 +1,3 @@
+kind: Fixed
+body: 'The effort of a call now reaches the engine: output_config.effort goes to the SDK effort option, and a later call with another effort changes it from the next user turn. The display of thinking (summarized or omitted) goes through. Other output_config keys are still dropped, and the log names each one as output_config.<key>. The call line of the log has the effort'
+time: 2026-11-13T03:44:46.000000000Z
