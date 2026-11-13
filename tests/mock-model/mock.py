@@ -157,6 +157,8 @@ class Handler(BaseHTTPRequestHandler):
             "keys": sorted(body.keys()),
             "metadata": body.get("metadata"),
             "temperature": body.get("temperature"),
+            "thinking": body.get("thinking"),
+            "output_config": body.get("output_config"),
             "cache_marks": cache_marks(body),
             "messages": [
                 {

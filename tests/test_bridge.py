@@ -19,6 +19,8 @@ import uuid
 from harness import GATEWAY_MASTER_KEY, KEYS, UPSTREAM_KEY, Pipe, Rig, call
 
 MODEL = "claude-test"
+# A model name for which the engine sends an effort.
+EFFORT_MODEL = os.environ.get("EFFORT_MODEL", "claude-opus-5-5")
 WEATHER = {
     "name": "get_weather",
     "description": "Get the weather of a city.",
@@ -54,8 +56,8 @@ def user(text):
     return {"role": "user", "content": text}
 
 
-def body(messages, system="You answer.", tools=(WEATHER,), **extra):
-    b = {"model": MODEL, "max_tokens": 1024, "system": system, "messages": messages, "tools": list(tools)}
+def body(messages, system="You answer.", tools=(WEATHER,), model=MODEL, **extra):
+    b = {"model": model, "max_tokens": 1024, "system": system, "messages": messages, "tools": list(tools)}
     b.update(extra)
     return b
 
@@ -643,6 +645,46 @@ class BridgeTest(unittest.TestCase):
         self.assertTrue(line["system_changed"], line)
         self.assertEqual(line["closest"], first.conversation)
         self.assertIsNone(line["diff"])
+
+    def test_19_the_effort_and_the_thinking_display_reach_the_engine(self):
+        """output_config.effort of a call is the effort of the engine, and the
+        next user turn with another effort changes it. The display of
+        adaptive thinking goes through. Any other output_config key is
+        dropped and logged by name."""
+        echo = mark("EFFORT")
+        thinking = {"type": "adaptive", "display": "summarized"}
+        start = [user(f"ECHO={echo}")]
+        first = call(
+            self.main.port,
+            body(
+                start,
+                tools=(),
+                thinking=thinking,
+                output_config={"effort": "low", "format": {"type": "json_schema", "schema": {"type": "object"}}},
+                model=EFFORT_MODEL,
+            ),
+            key=KEYS["main"],
+        )
+        msg = self.ok(first, "new")
+        history = start + [{"role": "assistant", "content": msg["content"]}, user(f"ECHO={echo} again")]
+        second = call(
+            self.main.port,
+            body(history, tools=(), thinking=thinking, output_config={"effort": "high"}, model=EFFORT_MODEL),
+            key=KEYS["main"],
+        )
+        self.ok(second, "matched")
+        self.assertEqual(second.conversation, first.conversation)
+        records = self.records_with(echo)
+        self.assertEqual(len(records), 2, records)
+        self.assertEqual([(r["output_config"] or {}).get("effort") for r in records], ["low", "high"], records)
+        for r in records:
+            self.assertNotIn("format", r["output_config"] or {})
+            self.assertEqual((r["thinking"] or {}).get("type"), "adaptive", r["thinking"])
+            self.assertEqual((r["thinking"] or {}).get("display"), "summarized", r["thinking"])
+        lines = self.calls_of(self.main, first.conversation)
+        self.assertEqual([l["effort"] for l in lines], ["low", "high"])
+        self.assertEqual(lines[0]["dropped"], ["output_config.format"])
+        self.assertEqual(lines[1]["dropped"], [])
 
     def test_99_no_marker_text_in_the_log(self):
         """The log of each bridge holds no text of a conversation and no key:

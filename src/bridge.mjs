@@ -22,7 +22,15 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Conversation, Registry, Sink } from "./conversation.mjs";
-import { domainOf, droppedFields, invalidCall, lastAssistant, loadKeys, withoutCacheMarks } from "./messages.mjs";
+import {
+  domainOf,
+  droppedFields,
+  effortOf,
+  invalidCall,
+  lastAssistant,
+  loadKeys,
+  withoutCacheMarks,
+} from "./messages.mjs";
 
 function number(name, fallback) {
   const raw = process.env[name];
@@ -132,6 +140,7 @@ async function handleMessages(req, res, started, work) {
     return reply(res, 400, "invalid_request_error", `bridge: ${invalid}`);
   }
   line.model = body.model;
+  line.effort = effortOf(body);
   const dropped = droppedFields(body);
   const marks = withoutCacheMarks(body.messages).removed + withoutCacheMarks(body.system ?? null).removed;
   const extra = { dropped, cache_marks_removed: marks };
@@ -175,7 +184,11 @@ async function handleMessages(req, res, started, work) {
       if (conversation.sink === sink) conversation.sink = null;
     }
   });
-  if (mode === "matched") conversation.next(body);
+  if (mode === "matched")
+    conversation.next(body).catch((error) => {
+      log("handler_error", { kind: error?.name || "Error" });
+      sink.fail(502, "bridge: the engine did not take the call");
+    });
   else conversation.start(body, mode === "rebuilt");
 }
 
