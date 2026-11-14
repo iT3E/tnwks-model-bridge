@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.2.4 - 2026-11-14
+
+### Security
+
+* bin/privacy-check reads the denylist in two forms: the plain list, and one opaque line that `bin/privacy-check --encode` makes from it. A value that reads as neither stops the check with exit 2. Hits print as "hit: <where>" with every term in it replaced by "[term]", case is ignored outside ASCII too whatever the locale, paths print as they are rather than as escapes, no term number and no count, and a failed search stops the check instead of passing it. The same files as the next app-repo-template release.
+
 ## v0.2.3 - 2026-11-14
 
 ### Fixed
