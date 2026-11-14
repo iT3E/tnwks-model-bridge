@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.2.3 - 2026-11-14
+
+### Fixed
+
+* The usage limit of the Claude plan is now 429 with rate_limit_error, before a stream starts, with a retry-after only from the plan's own reset time. The call line logs the real status of a failed call (error_in_stream for an error event), and a failed turn logs one engine_error with a clear kind, never success.
+
 ## v0.2.2 - 2026-11-13
 
 ### Fixed
