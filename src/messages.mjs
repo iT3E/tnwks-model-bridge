@@ -325,3 +325,50 @@ export function invalidCall(body) {
   }
   return null;
 }
+
+// The longest wait that a reset time of the plan can give: its longest
+// window is seven days. A reset time outside of it is not used.
+export const MAX_RESET_SECONDS = 8 * 24 * 3600;
+
+// The kind of a failed turn, from the result message of the engine. The
+// subtype "success" with is_error is a turn that ended on an API error, so
+// it is not a kind: the terminal reason is, or else "api_error".
+export function resultKind(result) {
+  if (result?.subtype && result.subtype !== "success") return String(result.subtype);
+  const reason = result?.terminal_reason;
+  return typeof reason === "string" && reason && reason !== "completed" ? reason : "api_error";
+}
+
+// The plan's word on its limit, from a `rate_limit_event` of the engine:
+// the limit and its reset time when the status is "rejected", else null.
+export function planLimitOf(info) {
+  if (info?.status !== "rejected") return null;
+  return {
+    type: typeof info.rateLimitType === "string" && /^[a-z_]+$/.test(info.rateLimitType) ? info.rateLimitType : null,
+    resetsAt: Number.isFinite(info.resetsAt) ? info.resetsAt : null,
+  };
+}
+
+// The answer of the bridge to a turn that failed with `kind`. A rate limit
+// of the plan is 429 with rate_limit_error. The bridge sends a retry-after
+// only with a reset time of the plan (seconds since the epoch) that is in
+// the future and inside the longest window. Each other kind is 502.
+export function engineFailure(kind, limit = null, now = Date.now()) {
+  if (kind !== "rate_limit") {
+    return {
+      status: 502,
+      type: "api_error",
+      message: `bridge: the engine ended the turn with an error (${kind})`,
+      headers: {},
+    };
+  }
+  let message = "bridge: rate limit: the usage limit of the Claude plan was reached";
+  const headers = {};
+  const wait = Number.isFinite(limit?.resetsAt) ? Math.ceil(limit.resetsAt - now / 1000) : NaN;
+  if (wait > 0 && wait <= MAX_RESET_SECONDS) {
+    headers["retry-after"] = String(wait);
+    const at = new Date(limit.resetsAt * 1000).toISOString();
+    message += limit.type ? ` (${limit.type}); it resets at ${at}` : `; it resets at ${at}`;
+  }
+  return { status: 429, type: "rate_limit_error", message, headers };
+}
