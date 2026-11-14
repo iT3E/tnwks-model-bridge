@@ -1,3 +1,3 @@
 kind: Security
-body: 'bin/privacy-check reads the denylist in two forms: the plain list, and one opaque line that `bin/privacy-check --encode` makes from it, which `task privacy:sync` now writes to the secret. A value that reads as neither stops the check with exit 2. Hits print as "hit: <where>", with no term number and no count, and a failed search stops the check instead of passing it. The same files as the next app-repo-template release.'
+body: 'bin/privacy-check reads the denylist in two forms: the plain list, and one opaque line that `bin/privacy-check --encode` makes from it. A value that reads as neither stops the check with exit 2. Hits print as "hit: <where>" with every term in it replaced by "[term]", no term number and no count, and a failed search stops the check instead of passing it. The same files as the next app-repo-template release.'
 time: 2026-11-14T15:00:00.000000+00:00

@@ -34,8 +34,9 @@
 # skip, and a line that contains "privacy:allow" is skipped. Messages, PR
 # text and comments have no exceptions.
 #
-# Hits print as "hit: <where>". The matched text, the term and its place in
-# the list are never printed, since CI logs can be read by anyone with repo
+# Hits print as "hit: <where>", with every occurrence of a term in <where>
+# replaced by "[term]". The matched text, the term and its place in the list
+# are never printed, since CI logs can be read by anyone with repo
 # access. Exit 0 clean, 1 a hit, 2 nothing checked (bad usage, no list, a
 # list that doesn't read, a search that failed).
 set -euo pipefail
@@ -47,22 +48,18 @@ broken() {
   exit 2
 }
 
-# The encoded form leaves out gzip's fixed 10-byte header (gzip -n: no name,
-# no time); reading puts it back.
-gzip_header() { printf '\037\213\010\000\000\000\000\000\002\003'; }
-
 # The terms of a list in either form, one per line, on stdout. Returns 1 if
-# the value is neither form, or doesn't decode.
+# the value is neither form, or doesn't decode. A value that mentions the
+# opaque form anywhere must be exactly one opaque line (trailing newlines
+# aside), or it doesn't read.
 read_terms() {
-  local raw lines first body payload line
+  local raw lines body payload line
   raw="$(tr -d '\r' <<<"$1")"
-  lines="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"${raw}" | grep -v -e '^$' || true)"
-  first="$(head -n 1 <<<"${lines}")"
-  if [[ "${first}" == '#privacy-terms:'* ]]; then
-    [[ "$(wc -l <<<"${lines}")" -eq 1 && "${first}" == "${opaque_prefix}"* ]] || return 1
-    body="${first#"${opaque_prefix}"}"
+  if [[ "${raw}" == *privacy-terms:* ]]; then
+    [[ "${raw}" != *$'\n'* && "${raw}" == "${opaque_prefix}"* ]] || return 1
+    body="${raw#"${opaque_prefix}"}"
     [[ "${body}" =~ ^[A-Za-z0-9+/]+={0,2}$ ]] || return 1
-    payload="$({ gzip_header && base64 -d <<<"${body}"; } 2>/dev/null | gzip -dc 2>/dev/null)" || return 1
+    payload="$(base64 -d <<<"${body}" 2>/dev/null | gzip -dc 2>/dev/null)" || return 1
     [[ -n "${payload}" ]] || return 1
     while IFS= read -r line; do
       [[ "${line}" =~ ^[0-9a-f]{16}\ (.+)$ ]] || return 1
@@ -70,18 +67,19 @@ read_terms() {
     done <<<"${payload}"
     return 0
   fi
+  lines="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"${raw}" | grep -v -e '^$' || true)"
   while IFS= read -r line; do
-    [[ -z "${line}" || "${line}" == \#* ]] && continue
     # A long run of base64 with no space is an encoded list that lost its
     # prefix, not a term.
-    [[ "${line}" =~ ^[A-Za-z0-9+/=]{40,}$ || "${line}" == *privacy-terms:* ]] && return 1
+    [[ "${line}" =~ ^[A-Za-z0-9+/=]{40,}$ ]] && return 1
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
     printf '%s\n' "${line}"
   done <<<"${lines}"
   return 0
 }
 
 # One opaque line from a list: each term behind its own random 16 hex
-# digits, gzip without its fixed header, base64. Retried until no term shows
+# digits, gzip, base64. Retried until no term shows
 # up in the result (case-insensitive), so the encoded value never contains a
 # term; it fails rather than write one that does.
 encode() {
@@ -92,7 +90,7 @@ encode() {
       for t in "${list[@]}"; do
         salt="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
         printf '%s %s\n' "${salt}" "${t}"
-      done | gzip -9nc | tail -c +11 | base64 | tr -d '\n'
+      done | gzip -9nc | base64 | tr -d '\n'
     )"
     ok=1
     for t in "${list[@]}"; do
@@ -178,8 +176,22 @@ pattern() {
   fi
 }
 
+patterns=()
+for t in "${terms[@]}"; do patterns+=("$(pattern "${t}")"); done
+
+# A location is printed with every occurrence of every term replaced by
+# "[term]" (case-insensitive, also inside a longer word), so a hit in a path
+# or a name never prints a term.
+masked() {
+  perl -e 'my $s = shift; for my $t (@ARGV) { $s =~ s/\Q$t\E/[term]/gi } print $s' -- "$1" "${terms[@]}" 2>/dev/null
+}
 hits=0
-report() { echo "hit: $1"; hits=1; }
+report() {
+  local where
+  where="$(masked "$1")" || broken "a search failed"
+  echo "hit: ${where}"
+  hits=1
+}
 # grep: 0 a match, 1 none, 2 an error. An error stops the check; its message
 # isn't printed, since it can quote the pattern.
 has() {
@@ -196,8 +208,7 @@ matches() {
 
 files="$(git ls-files -- "${pathspec[@]}")" || broken "git ls-files failed"
 
-for t in "${terms[@]}"; do
-  p="$(pattern "${t}")"
+for p in "${patterns[@]}"; do
 
   if [[ -n "${message}" ]]; then
     if has "${p}" "${input}"; then report "commit message"; fi
