@@ -10,6 +10,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
   effortOf,
+  engineFailure,
   historyKey,
   historyKeyOfHash,
   historyText,
@@ -17,6 +18,8 @@ import {
   lastAssistant,
   lastToolUseIds,
   newInput,
+  planLimitOf,
+  resultKind,
   sha,
   shapeDiff,
   shortHash,
@@ -77,57 +80,73 @@ function errorBody(type, message) {
   return { type: "error", error: { type, message } };
 }
 
+// The error type of a status of the bridge. 529 and 503 tell the caller to
+// try again (the drain at shutdown uses 503); 429 is a rate limit.
+function errorType(status) {
+  if (status === 529 || status === 503) return "overloaded_error";
+  if (status === 429) return "rate_limit_error";
+  return "api_error";
+}
+
 // Where the events of one model call go: a stream of server-sent events, or
-// one JSON body. `onEnd(status)` runs one time, when the call ends.
+// one JSON body. A stream starts (status 200 and its headers) with its first
+// event, so an error before it is an HTTP error. `onEnd(status, inStream)`
+// runs one time, when the call ends: the status of the answer, or of the
+// error, and whether the error went as an `error` event in a stream.
 export class Sink {
   constructor({ res, stream, conversation, mode, callMs, onEnd }) {
     this.res = res;
     this.stream = stream;
     this.done = false;
     this.status = 200;
+    this.inStream = false;
     this.onEnd = onEnd;
     this.headers = { "x-bridge-conversation": conversation.ref, "x-bridge-mode": mode };
     this.timer = setTimeout(() => {
       this.fail(504, "bridge: the model call did not end in time");
       conversation.close("call_timeout");
     }, callMs);
-    if (stream) {
-      res.writeHead(200, {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-        ...this.headers,
-      });
-    }
+  }
+  start() {
+    if (this.res.headersSent) return;
+    this.res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      ...this.headers,
+    });
   }
   event(ev) {
     if (this.done || !this.stream) return;
+    this.start();
     this.res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
   }
   end() {
     this.done = true;
     clearTimeout(this.timer);
-    this.onEnd?.(this.status);
+    this.onEnd?.(this.status, this.inStream);
   }
   finish(message) {
     if (this.done) return;
-    if (this.stream) this.res.end();
-    else {
+    if (this.stream) {
+      this.start();
+      this.res.end();
+    } else {
       this.res.writeHead(200, { "content-type": "application/json", ...this.headers });
       this.res.end(JSON.stringify(message));
     }
     this.end();
   }
-  fail(status, text) {
+  fail(status, text, type = errorType(status), headers = {}) {
     if (this.done) return;
-    // 529 and 503 tell the caller to try again; the drain at shutdown uses 503.
-    const body = errorBody(status === 529 || status === 503 ? "overloaded_error" : "api_error", text);
+    const body = errorBody(type, text);
+    this.status = status;
     if (this.stream && this.res.headersSent) {
+      this.inStream = true;
       this.res.write(`event: error\ndata: ${JSON.stringify(body)}\n\n`);
       this.res.end();
     } else {
-      this.status = status;
-      this.res.writeHead(status, { "content-type": "application/json" });
+      this.res.writeHead(status, { "content-type": "application/json", ...headers });
       this.res.end(JSON.stringify(body));
     }
     this.end();
@@ -283,6 +302,10 @@ export class Conversation {
     this.touched = Date.now();
     this.closed = false;
     this.stderrBytes = 0;
+    // The error of the API in the turn in work, and the last word of the
+    // plan on its limit (planLimitOf).
+    this.turnError = null;
+    this.planLimit = null;
     // A home of its own for each engine: its config and its temporary files.
     this.home = mkdtempSync(join(registry.stateDir, "conv-"));
     registry.all.add(this);
@@ -365,12 +388,24 @@ export class Conversation {
             permission_mode: msg.permissionMode,
             api_key_source: msg.apiKeySource,
           });
+        } else if (msg.type === "rate_limit_event") {
+          // The plan's word on its limit, for the answer to a rate limit.
+          this.planLimit = planLimitOf(msg.rate_limit_info);
         } else if (msg.type === "assistant" && msg.error) {
-          this.log("engine_error", { domain: this.domainName, conversation: this.ref, kind: String(msg.error) });
-        } else if (msg.type === "result" && msg.is_error) {
-          // A failed turn ends the conversation, so that it does not hold a place.
-          this.log("engine_error", { domain: this.domainName, conversation: this.ref, kind: String(msg.subtype) });
-          this.sink?.fail(502, `bridge: the engine ended the turn with an error (${msg.subtype})`);
+          // The error of the API in this turn, such as "rate_limit". The
+          // result of the turn comes after it.
+          this.turnError = String(msg.error);
+          this.logError(this.turnError);
+        } else if (msg.type === "result") {
+          const kind = this.turnError;
+          this.turnError = null;
+          if (!msg.is_error) continue;
+          // A failed turn ends the conversation, so that it does not hold a
+          // place. Its kind is in the log one time: the error of the API, or
+          // else the kind of the result.
+          if (!kind) this.logError(resultKind(msg));
+          const failure = engineFailure(kind ?? resultKind(msg), this.planLimit);
+          this.sink?.fail(failure.status, failure.message, failure.type, failure.headers);
           this.close("turn_error");
           break;
         }
@@ -381,6 +416,15 @@ export class Conversation {
     } finally {
       this.close("engine_ended");
     }
+  }
+
+  logError(kind) {
+    const fields = { domain: this.domainName, conversation: this.ref, kind };
+    if (kind === "rate_limit" && this.planLimit) {
+      fields.limit = this.planLimit.type;
+      fields.resets_at = this.planLimit.resetsAt;
+    }
+    this.log("engine_error", fields);
   }
 
   // One event of a model call of the engine: to the caller, with the names

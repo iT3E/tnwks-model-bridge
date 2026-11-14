@@ -98,6 +98,18 @@ A gateway entry for a trust domain:
   ends the one that was idle for the longest time. When each live
   conversation has a call in work, the bridge answers 529. A second call
   for a conversation with a call in work gets 409.
+- **A failed turn.** When the engine ends a turn with an error, the bridge
+  ends the conversation. At the usage limit of the Claude plan (the engine
+  reports `rate_limit`) the call gets 429 with `rate_limit_error` and the
+  words "the usage limit of the Claude plan was reached". When the engine
+  gave the reset time of the plan (a `rate_limit_event` with the status
+  `rejected`), the answer has a `retry-after` and the message names the
+  limit and the time; else neither. The bridge does not try again and does
+  not move a call to another provider. Each other error is 502 with
+  `api_error` and its kind.
+- **Streams.** A stream starts (200 and its headers) with the first event
+  of the engine. An error before it is an HTTP error with a JSON body, for
+  example the 429 of the plan; an error after it is an `error` event.
 - **Shutdown.** On SIGTERM the bridge drains. `/health` answers 503, the
   server takes no new connection, and a call that still comes on an open
   connection gets 503 with `overloaded_error` and the words "service
@@ -120,11 +132,15 @@ One JSON line on standard output for each call: `domain`, `model`,
 `conversation` (a short hash of a random id), `mode` (`new`, `matched` or
 `rebuilt`), `effort` (the effort of the call, or null), `status`, `ms`,
 `dropped` (field names) and
-`cache_marks_removed`. A refused call (401) has `status` and `ms` only.
+`cache_marks_removed`. `status` is the status of the answer, or of its
+error: a call that failed in a stream that started has the status of the
+error and `error_in_stream: true`. A refused call (401) has `status` and
+`ms` only.
 The other lines: `listening`, `engine_init` (the engine version, the count
 of tools, any tool that is not of the caller, the MCP servers, the
 permission mode), `conversation_end` with its reason, `engine_error` with
-its kind, and `orphan_model_call` (a model call of the engine with no call
+its kind (one line for each error; for a `rate_limit` with the reset time of
+the plan, also `limit` and `resets_at`), and `orphan_model_call` (a model call of the engine with no call
 of a caller, with its model), `drain_start` and `drain_end` (the count of
 calls cut).
 

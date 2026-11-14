@@ -13,6 +13,11 @@ It answers by marks in the user texts of a request:
 - `TOOLS2=<name>`: the same, with two calls of the tool in one answer.
 - `ECHO=<word>`: the text answer holds `ECHO-<word>`.
 - `DELAY=<seconds>`: the answer waits that long first.
+- `STALL=<seconds>`: a stream sends its first event, then waits that long
+  before the rest.
+- `RATELIMIT=plan`: the answer is the 429 of a plan at its usage limit,
+  with the headers of the limit (the five-hour window, reset in an hour)
+  and `x-should-retry: false`, so the engine does not try again.
 - Else it answers `MOCK-OK`.
 
 It keeps a record of each request in memory: the headers that tell the
@@ -192,9 +197,30 @@ class Handler(BaseHTTPRequestHandler):
         delay = find(r"DELAY=([0-9.]+)", user_texts)
         if delay:
             time.sleep(min(float(delay), 60))
+        if find(r"RATELIMIT=(plan)", user_texts):
+            record["answer"] = ["rate_limit"]
+            return self.rate_limited()
         content = self.answer(body, user_texts)
         record["answer"] = [b.get("name") or b.get("text") for b in content]
-        self.reply(body, content)
+        stall = find(r"STALL=([0-9.]+)", user_texts)
+        self.reply(body, content, stall=min(float(stall), 60) if stall else 0)
+
+    def rate_limited(self):
+        data = json.dumps(
+            {
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "This request would exceed your account's rate limit."},
+            }
+        ).encode()
+        self.send_response(429)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.send_header("x-should-retry", "false")
+        self.send_header("anthropic-ratelimit-unified-status", "rejected")
+        self.send_header("anthropic-ratelimit-unified-reset", str(int(time.time()) + 3600))
+        self.send_header("anthropic-ratelimit-unified-representative-claim", "five_hour")
+        self.end_headers()
+        self.wfile.write(data)
 
     def answer(self, body, texts):
         echo = find(r"ECHO=([A-Za-z0-9-]+)", texts) or ""
@@ -220,7 +246,7 @@ class Handler(BaseHTTPRequestHandler):
             text += f" ECHO-{echo}"
         return [{"type": "text", "text": text}]
 
-    def reply(self, body, content):
+    def reply(self, body, content, stall=0):
         stop = "tool_use" if any(b["type"] == "tool_use" for b in content) else "end_turn"
         usage = {
             "input_tokens": 11,
@@ -247,6 +273,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         start = dict(msg, content=[], stop_reason=None, usage=dict(usage, output_tokens=1))
         self._event("message_start", {"type": "message_start", "message": start})
+        if stall:
+            time.sleep(stall)
         for i, block in enumerate(content):
             if block["type"] == "text":
                 first = {"type": "text", "text": ""}

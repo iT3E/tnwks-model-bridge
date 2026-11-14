@@ -586,9 +586,10 @@ class BridgeTest(unittest.TestCase):
         words = {"stream": mark("CUT-STREAM"), "json": mark("CUT-JSON")}
 
         def slow(kind):
-            extra = {"stream": True} if kind == "stream" else {}
+            # The stream starts (its first event) and then waits.
+            extra, wait = ({"stream": True}, "STALL") if kind == "stream" else ({}, "DELAY")
             out[kind] = call(
-                bridge.port, body([user(f"DELAY=20 ECHO={words[kind]}")], tools=(), **extra), key=KEYS["main"]
+                bridge.port, body([user(f"{wait}=20 ECHO={words[kind]}")], tools=(), **extra), key=KEYS["main"]
             )
 
         threads = [threading.Thread(target=slow, args=(k,)) for k in words]
@@ -612,6 +613,8 @@ class BridgeTest(unittest.TestCase):
         lines = self.drain_lines(bridge)
         self.assertEqual(lines[-1]["event"], "drain_end", lines)
         self.assertEqual(lines[-1]["cut"], 2)
+        cut = [l for l in bridge.log_lines() if l.get("event") == "call"]
+        self.assertEqual(sorted((l["status"], l.get("error_in_stream", False)) for l in cut), [(503, False), (503, True)])
 
     def test_18_the_reason_of_a_rebuild_is_in_the_log(self):
         """A call whose history matches no live conversation logs why: here a
@@ -685,6 +688,57 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual([l["effort"] for l in lines], ["low", "high"])
         self.assertEqual(lines[0]["dropped"], ["output_config.format"])
         self.assertEqual(lines[1]["dropped"], [])
+
+    # ------------------------------------------------- the plan's limit
+    def rate_limited(self, stream):
+        """A call that the plan refuses at its usage limit, and the log lines
+        that the main bridge wrote for it."""
+        before = len(self.main.log_lines())
+        word = mark("PLAN-LIMIT")
+        extra = {"stream": True} if stream else {}
+        res = call(self.main.port, body([user(f"RATELIMIT=plan ECHO={word}")], tools=(), **extra), key=KEYS["main"])
+        return res, self.main.log_lines()[before:]
+
+    def assert_rate_limited(self, res, lines):
+        self.assertEqual(res.status, 429, res.body)
+        self.assertEqual(res.events, [])
+        self.assertEqual(res.headers["content-type"], "application/json")
+        self.assertEqual(res.body["type"], "error")
+        self.assertEqual(res.body["error"]["type"], "rate_limit_error", res.body)
+        self.assertIn("usage limit of the Claude plan was reached", res.body["error"]["message"])
+        self.assertNotIn("success", res.body["error"]["message"])
+        calls = [l for l in lines if l.get("event") == "call"]
+        self.assertEqual([l["status"] for l in calls], [429], calls)
+        self.assertNotIn("error_in_stream", calls[0])
+        errors = [l for l in lines if l.get("event") == "engine_error"]
+        self.assertEqual([l["kind"] for l in errors], ["rate_limit"], errors)
+        deadline = time.time() + 10
+        while not self.ended(self.main, calls[0]["conversation"]) and time.time() < deadline:
+            time.sleep(0.2)
+        self.assertEqual(self.ended(self.main, calls[0]["conversation"]), ["turn_error"])
+        return errors[0]
+
+    def test_20_a_plan_limit_is_429(self):
+        """At the usage limit of the plan a JSON call gets 429 with
+        rate_limit_error, the call line logs 429, and the log has one
+        engine_error of kind rate_limit."""
+        self.assert_rate_limited(*self.rate_limited(stream=False))
+
+    def test_21_a_plan_limit_on_a_stream_is_429_before_it_starts(self):
+        """The same for a stream: the limit comes before the first event, so
+        the answer is HTTP 429, not a stream with an error event."""
+        self.assert_rate_limited(*self.rate_limited(stream=True))
+
+    @unittest.skipUnless(os.environ.get("IMAGE_REF"), "the image test only")
+    def test_22_the_model_gateway_passes_the_429_on(self):
+        """Through the model gateway the caller gets the 429 and the error
+        body of the bridge."""
+        b = body([user(f"RATELIMIT=plan ECHO={mark('GATEWAY-LIMIT')}")], tools=())
+        b["model"] = "agents-workflows"
+        res = call(self.rig.gateway_port, b, key=GATEWAY_MASTER_KEY)
+        self.assertEqual(res.status, 429, res.body)
+        self.assertEqual(res.body["error"]["type"], "rate_limit_error", res.body)
+        self.assertIn("usage limit of the Claude plan was reached", res.body["error"]["message"])
 
     def test_99_no_marker_text_in_the_log(self):
         """The log of each bridge holds no text of a conversation and no key:
