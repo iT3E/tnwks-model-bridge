@@ -5,7 +5,7 @@
   // template update moves the pin. Repo-only rules go below the extends;
   // copier update keeps them.
   extends: [
-    "github>iT3E/github-workflows//renovate/default.json5#v1.8.1",
-    "github>iT3E/github-workflows//renovate/node.json5#v1.8.1",
+    "github>iT3E/github-workflows//renovate/default.json5#v1.9.2",
+    "github>iT3E/github-workflows//renovate/node.json5#v1.9.2",
   ],
 }
