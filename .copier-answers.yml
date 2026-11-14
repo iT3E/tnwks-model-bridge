@@ -1,5 +1,5 @@
 # Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
-_commit: v0.9.2
+_commit: v0.10.0
 _src_path: https://github.com/iT3E/app-repo-template.git
 extra_test_command: ''
 has_image: true
