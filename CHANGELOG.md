@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.2.5 - 2026-11-16
+
+### Fixed
+
+* Dependency updates: fix(node): update @anthropic-ai/claude-agent-sdk to 0.3.323 (#9)
+
 ## v0.2.4 - 2026-11-14
 
 ### Security
