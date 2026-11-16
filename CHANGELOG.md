@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.2.6 - 2026-11-16
+
+### Fixed
+
+* Dependency updates: fix(node): update prettier to 3.10.1 (#10)
+
 ## v0.2.5 - 2026-11-16
 
 ### Fixed
