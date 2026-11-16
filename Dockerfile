@@ -1,7 +1,7 @@
 # The model bridge: Node, the Claude Agent SDK at the release that
 # package-lock.json pins, and the bridge. No secret and no config is in the
 # image: the keys and the sign-in of the plan come as env vars at run time.
-FROM docker.io/library/node:24.22.3-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b3c7b3fc99615654f124a0
+FROM docker.io/library/node:26.13.1-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc
 
 ARG VERSION=dev
 ARG REVISION=unknown
