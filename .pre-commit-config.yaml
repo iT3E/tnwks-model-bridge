@@ -14,7 +14,7 @@ repos:
   # hooks installed is still covered.
   - repo: https://github.com/betterleaks/betterleaks
     # renovate: datasource=github-tags depName=betterleaks/betterleaks
-    rev: v1.10.0
+    rev: v1.10.1
     hooks:
       - id: betterleaks
   - repo: local
