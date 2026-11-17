@@ -203,6 +203,7 @@ export class Registry {
       return null;
     };
     if (!conversation || conversation.closed) return missed(null);
+    if (conversation.orphaned) return missed("orphan_model_call");
     if (conversation.model !== body.model || conversation.systemHash !== sha(systemText(body.system)))
       return missed("system_or_model_changed");
     const answered = newInput(body.messages).some((b) => b?.type === "tool_result");
@@ -306,6 +307,15 @@ export class Conversation {
     // plan on its limit (planLimitOf).
     this.turnError = null;
     this.planLimit = null;
+    // The engine started a model call with no call of a caller: its history
+    // is no longer the history of the caller, so no call matches it again.
+    this.orphaned = false;
+    // The names of the tools that the engine has, as the model names them.
+    this.offered = new Set(this.tools.map((t) => PREFIX + t.name));
+    // The last answer that went to a caller: when, and how many of its tool
+    // calls name a tool that the engine does not have. Counts only.
+    this.lastAnswer = null;
+    this.notOffered = 0;
     // A home of its own for each engine: its config and its temporary files.
     this.home = mkdtempSync(join(registry.stateDir, "conv-"));
     registry.all.add(this);
@@ -435,6 +445,8 @@ export class Conversation {
       this.current = structuredClone(ev.message);
       this.current.content = [];
       this.parts = new Map();
+      this.notOffered = 0;
+      if (!this.sink) this.orphaned = true;
     } else if (!this.current) {
       return;
     } else if (ev.type === "content_block_start") {
@@ -442,6 +454,7 @@ export class Conversation {
       if (block.type === "tool_use" && block.name.startsWith(PREFIX)) block.name = block.name.slice(PREFIX.length);
       this.current.content[ev.index] = structuredClone(block);
       if (block.type === "tool_use") {
+        if (!this.offered.has(ev.content_block.name)) this.notOffered++;
         this.parts.set(ev.index, "");
         this.call(block.id, block.name);
         this.domain.byToolUse.set(idKey(block.id), this);
@@ -482,13 +495,40 @@ export class Conversation {
     const history = [...this.history, { role: "assistant", content: message.content }];
     this.answered = history;
     this.domain.byHistory.set(historyKeyOfHash(this.model, this.systemHash, history), this);
-    if (!this.sink) {
-      this.log("orphan_model_call", { domain: this.domainName, conversation: this.ref, model: message.model });
-      return;
-    }
+    if (!this.sink) return this.orphan(message);
+    this.lastAnswer = { at: Date.now(), notOffered: this.notOffered };
     const sink = this.sink;
     this.sink = null;
     sink.finish(message);
+  }
+
+  // A model call of the engine that no caller waits for. The engine went on
+  // by itself, most likely after it answered a tool call of the last answer
+  // itself (a name that it does not have), so the caller's next call would
+  // wait for an event that never comes. The conversation ends, and the next
+  // call of the caller rebuilds it from the history that the caller sends.
+  // Counts and kinds only.
+  orphan(message) {
+    const own = new Set(message.content.filter((b) => b.type === "tool_use").map((b) => idKey(b.id)));
+    let notAsked = 0;
+    let waiting = 0;
+    for (const [key, c] of this.calls) {
+      if (own.has(key) || c.result) continue;
+      if (c.handled) waiting++;
+      else notAsked++;
+    }
+    this.log("orphan_model_call", {
+      domain: this.domainName,
+      conversation: this.ref,
+      model: message.model,
+      stop_reason: message.stop_reason ?? null,
+      tool_uses: own.size,
+      ms_after_answer: this.lastAnswer ? Date.now() - this.lastAnswer.at : null,
+      answer_tools_not_offered: this.lastAnswer?.notOffered ?? null,
+      tool_calls_not_asked: notAsked,
+      tool_calls_waiting: waiting,
+    });
+    this.close("orphan_model_call");
   }
 
   call(id, name) {
@@ -522,14 +562,18 @@ export class Conversation {
   }
 
   // A tool_result of the caller: to its handler that waits, or kept for it.
+  // True when the engine waited for it.
   deliver(block) {
     const call = this.calls.get(idKey(block.tool_use_id));
-    if (!call) return;
+    if (!call) return false;
     const result = toMcpResult(block);
     if (call.resolve) {
       this.forget(block.tool_use_id);
       call.resolve(result);
-    } else call.result = result;
+      return true;
+    }
+    call.result = result;
+    return false;
   }
 
   // The history that the next call of the caller should start with.
@@ -581,18 +625,24 @@ export class Conversation {
   }
 
   // A later call of the conversation. A new effort is set before the input
-  // goes in, so the next model call has it.
+  // goes in, so the next model call has it. It gives the count of tool
+  // results that no tool call of the engine waited for.
   async next(body) {
     this.history = body.messages;
     await this.setEffort(effortOf(body));
-    if (this.closed) return;
+    if (this.closed) return 0;
     const input = newInput(body.messages);
     const results = input.filter((b) => b?.type === "tool_result");
     const other = input.filter((b) => b?.type !== "tool_result");
-    if (!results.length) return this.push(input);
-    for (const block of results) this.deliver(block);
+    if (!results.length) {
+      this.push(input);
+      return 0;
+    }
+    let notAwaited = 0;
+    for (const block of results) if (!this.deliver(block)) notAwaited++;
     // A text next to the results goes in as the next user message.
     if (other.length) this.push(other);
+    return notAwaited;
   }
 
   close(reason) {

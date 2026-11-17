@@ -740,6 +740,68 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(res.body["error"]["type"], "rate_limit_error", res.body)
         self.assertIn("usage limit of the Claude plan was reached", res.body["error"]["message"])
 
+    def orphan_of(self, conversation, timeout=10):
+        """The orphan_model_call line of a conversation, when it comes."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for line in self.main.log_lines():
+                if line.get("event") == "orphan_model_call" and line.get("conversation") == conversation:
+                    return line
+            time.sleep(0.1)
+        self.fail(f"no orphan_model_call for {conversation}")
+
+    def test_23_a_tool_call_the_engine_answers_itself_does_not_hang_the_next_call(self):
+        """The model names a tool of the caller with no prefix, so the engine
+        answers that call itself and calls the model again with no caller:
+        an orphan model call. The bridge ends that conversation, and the
+        caller's tool result rebuilds it at once, not after the call
+        timeout. The orphan line has counts and kinds only."""
+        echo = mark("ORPHAN")
+        start = [user(f"BADTOOL=get_weather ECHO={echo}")]
+        first = call(self.main.port, body(start), key=KEYS["main"])
+        msg = self.ok(first, "new")
+        self.assertEqual([u["name"] for u in tool_uses(msg)], ["get_weather"])
+
+        line = self.orphan_of(first.conversation)
+        allowed = {
+            "ts", "event", "domain", "model", "conversation", "stop_reason", "tool_uses", "ms_after_answer",
+            "answer_tools_not_offered", "tool_calls_not_asked", "tool_calls_waiting",
+        }
+        self.assertEqual(set(line) - allowed, set(), line)
+        self.assertEqual(line["stop_reason"], "end_turn")
+        self.assertEqual(line["tool_uses"], 0)
+        self.assertEqual(line["answer_tools_not_offered"], 1)
+        self.assertEqual(line["tool_calls_not_asked"], 1)
+        self.assertEqual(line["tool_calls_waiting"], 0)
+        self.assertGreaterEqual(line["ms_after_answer"], 0)
+        self.assertEqual(self.ended(self.main, first.conversation), ["orphan_model_call"])
+
+        history = start + [{"role": "assistant", "content": msg["content"]}]
+        began = time.time()
+        result = mark("ORPHAN-RESULT")
+        second = call(self.main.port, body(history + [results_for(msg, result)]), key=KEYS["main"])
+        self.ok(second, "rebuilt")
+        self.assertLess(time.time() - began, 30)
+        self.assertNotEqual(second.conversation, first.conversation)
+        # The tool result of the caller reached the model, in the rebuilt history.
+        self.assertEqual(len(self.records_with(result)), 1)
+
+    def test_24_an_answer_cut_at_max_tokens_is_not_matched_after_the_engine_goes_on(self):
+        """At max_tokens the engine goes on by itself with a model call of its
+        own. The caller never saw that answer, so its next call is rebuilt,
+        not matched to an engine with another history."""
+        start = [user(f"MAXTOKENS=1 ECHO={mark('CUT')}")]
+        first = call(self.main.port, body(start, tools=()), key=KEYS["main"])
+        msg = self.ok(first, "new")
+        self.assertEqual(msg["stop_reason"], "max_tokens")
+        line = self.orphan_of(first.conversation)
+        self.assertEqual(line["answer_tools_not_offered"], 0)
+        self.assertEqual(line["tool_calls_not_asked"], 0)
+        history = start + [{"role": "assistant", "content": msg["content"]}, user(mark("GO-ON"))]
+        second = call(self.main.port, body(history, tools=()), key=KEYS["main"])
+        self.ok(second, "rebuilt")
+        self.assertNotEqual(second.conversation, first.conversation)
+
     def test_99_no_marker_text_in_the_log(self):
         """The log of each bridge holds no text of a conversation and no key:
         none of the marker texts of the tests above, and no fake key."""
