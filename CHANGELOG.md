@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.2.7 - 2026-11-17
+
+### Fixed
+
+* An orphan model call (the engine calls the model with no caller, for example after it answered a tool call itself) ends its conversation, so the next call is rebuilt at once and does not wait out BRIDGE_CALL_SECONDS. The orphan_model_call line has the stop reason and counts of the tool calls, and a matched call logs tool_results_not_awaited.
+
 ## v0.2.6 - 2026-11-16
 
 ### Fixed

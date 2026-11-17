@@ -1,3 +1,0 @@
-kind: Fixed
-body: 'An orphan model call (the engine calls the model with no caller, for example after it answered a tool call itself) ends its conversation, so the next call is rebuilt at once and does not wait out BRIDGE_CALL_SECONDS. The orphan_model_call line has the stop reason and counts of the tool calls, and a matched call logs tool_results_not_awaited.'
-time: 2026-11-17T19:30:00.000000+00:00
