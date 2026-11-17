@@ -11,6 +11,12 @@ It answers by marks in the user texts of a request:
   `<name>` or ends in `__<name>`, with the input `{"q": "<the ECHO mark>"}`.
   An answer after a tool result is text.
 - `TOOLS2=<name>`: the same, with two calls of the tool in one answer.
+- `BADTOOL=<name>`: the first answer asks for the tool `<name>` as it is,
+  with no prefix. That is not a name the request offered, so the engine
+  answers that call itself and calls the model again.
+- `BADINPUT=<name>`: the first answer asks for the offered tool `<name>`
+  with an input that its schema refuses (no `q`).
+- `MAXTOKENS=1`: the first answer is text that stops at `max_tokens`.
 - `ECHO=<word>`: the text answer holds `ECHO-<word>`.
 - `DELAY=<seconds>`: the answer waits that long first.
 - `STALL=<seconds>`: a stream sends its first event, then waits that long
@@ -201,6 +207,9 @@ class Handler(BaseHTTPRequestHandler):
             record["answer"] = ["rate_limit"]
             return self.rate_limited()
         content = self.answer(body, user_texts)
+        if find(r"MAXTOKENS=(1)", user_texts) and not any(m.get("role") == "assistant" for m in body.get("messages") or []):
+            record["answer"] = ["max_tokens"]
+            return self.reply(body, [{"type": "text", "text": "MOCK-CUT"}], stop="max_tokens")
         record["answer"] = [b.get("name") or b.get("text") for b in content]
         stall = find(r"STALL=([0-9.]+)", user_texts)
         self.reply(body, content, stall=min(float(stall), 60) if stall else 0)
@@ -228,7 +237,15 @@ class Handler(BaseHTTPRequestHandler):
         tool = find(r"TOOL=([A-Za-z0-9_-]+)", texts)
         two = find(r"TOOLS2=([A-Za-z0-9_-]+)", texts)
         wanted = two or tool
-        if wanted and tool_rounds(body) == 0:
+        first = tool_rounds(body) == 0
+        bad = find(r"BADTOOL=([A-Za-z0-9_-]+)", texts)
+        if bad and first:
+            return [{"type": "tool_use", "id": f"toolu_mock{next(TOOL_IDS):05d}", "name": bad, "input": {"q": "none"}}]
+        badinput = find(r"BADINPUT=([A-Za-z0-9_-]+)", texts)
+        if badinput and first:
+            name = offered_tool(badinput, offered) or badinput
+            return [{"type": "tool_use", "id": f"toolu_mock{next(TOOL_IDS):05d}", "name": name, "input": {"wrong": 1}}]
+        if wanted and first:
             name = offered_tool(wanted, offered)
             if not name:
                 return [{"type": "text", "text": f"MOCK-NOT-OFFERED {wanted}"}]
@@ -246,8 +263,8 @@ class Handler(BaseHTTPRequestHandler):
             text += f" ECHO-{echo}"
         return [{"type": "text", "text": text}]
 
-    def reply(self, body, content, stall=0):
-        stop = "tool_use" if any(b["type"] == "tool_use" for b in content) else "end_turn"
+    def reply(self, body, content, stall=0, stop=None):
+        stop = stop or ("tool_use" if any(b["type"] == "tool_use" for b in content) else "end_turn")
         usage = {
             "input_tokens": 11,
             "cache_creation_input_tokens": 0,

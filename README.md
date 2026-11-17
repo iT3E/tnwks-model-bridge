@@ -107,6 +107,16 @@ A gateway entry for a trust domain:
   limit and the time; else neither. The bridge does not try again and does
   not move a call to another provider. Each other error is 502 with
   `api_error` and its kind.
+- **A model call of the engine's own.** When the engine starts a model call
+  that no call of a caller waits for (an orphan model call), the bridge
+  ends that conversation, and the next call of the caller is rebuilt from
+  its history. Two causes are known: the model names a tool with no
+  `mcp__client__` prefix, so the engine answers that tool call itself (an
+  error) and calls the model again, while the caller gets the tool call
+  and runs it; or an answer stops at `max_tokens` and the engine goes on.
+  Before this, the next call matched the conversation, its tool results
+  found no tool call that waited, and the call waited until
+  `BRIDGE_CALL_SECONDS` (504).
 - **Streams.** A stream starts (200 and its headers) with the first event
   of the engine. An error before it is an HTTP error with a JSON body, for
   example the 429 of the plan; an error after it is an `error` event.
@@ -132,7 +142,9 @@ One JSON line on standard output for each call: `domain`, `model`,
 `conversation` (a short hash of a random id), `mode` (`new`, `matched` or
 `rebuilt`), `effort` (the effort of the call, or null), `status`, `ms`,
 `dropped` (field names) and
-`cache_marks_removed`. `status` is the status of the answer, or of its
+`cache_marks_removed`, and for a matched call `tool_results_not_awaited`
+when some tool results found no tool call of the engine that waited for
+them. `status` is the status of the answer, or of its
 error: a call that failed in a stream that started has the status of the
 error and `error_in_stream: true`. A refused call (401) has `status` and
 `ms` only.
@@ -141,7 +153,12 @@ of tools, any tool that is not of the caller, the MCP servers, the
 permission mode), `conversation_end` with its reason, `engine_error` with
 its kind (one line for each error; for a `rate_limit` with the reset time of
 the plan, also `limit` and `resets_at`), and `orphan_model_call` (a model call of the engine with no call
-of a caller, with its model), `drain_start` and `drain_end` (the count of
+of a caller: its model, `stop_reason`, `tool_uses` (the count in it),
+`ms_after_answer` (since the last answer to the caller),
+`answer_tools_not_offered` (the tool calls of that answer that name a tool
+the engine does not have), `tool_calls_not_asked` (earlier tool calls that
+the engine never asked the bridge for) and `tool_calls_waiting`; the
+conversation then ends with the reason `orphan_model_call`), `drain_start` and `drain_end` (the count of
 calls cut).
 
 A `rebuild` line tells why a call with a history matched no live

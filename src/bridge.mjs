@@ -187,10 +187,17 @@ async function handleMessages(req, res, started, work) {
     }
   });
   if (mode === "matched")
-    conversation.next(body).catch((error) => {
-      log("handler_error", { kind: error?.name || "Error" });
-      sink.fail(502, "bridge: the engine did not take the call");
-    });
+    conversation
+      .next(body)
+      .then((notAwaited) => {
+        // A result that no tool call of the engine waited for: the engine
+        // already went on without it.
+        if (notAwaited) extra.tool_results_not_awaited = notAwaited;
+      })
+      .catch((error) => {
+        log("handler_error", { kind: error?.name || "Error" });
+        sink.fail(502, "bridge: the engine did not take the call");
+      });
   else conversation.start(body, mode === "rebuilt");
 }
 
