@@ -24,6 +24,12 @@ It answers by marks in the user texts of a request:
 - `RATELIMIT=plan`: the answer is the 429 of a plan at its usage limit,
   with the headers of the limit (the five-hour window, reset in an hour)
   and `x-should-retry: false`, so the engine does not try again.
+- `PLANUSE=<five hour>:<seven day>[:warn]`: the answer carries the headers
+  of a plan with that use of each window (fractions, for example
+  `0.42:0.10`), as the vendor sends them to a client of a plan. The last
+  such mark in the user texts counts. The reset times stay the same while
+  the mock runs. With `warn` the five hour window is past a warning
+  threshold.
 - Else it answers `MOCK-OK`.
 
 It keeps a record of each request in memory: the headers that tell the
@@ -54,6 +60,8 @@ RECORDS = []
 LOCK = threading.Lock()
 MESSAGE_IDS = itertools.count(1)
 TOOL_IDS = itertools.count(1)
+# The windows of the plan start with the mock, so their reset times stay.
+STARTED = int(time.time())
 
 
 def text_of(content):
@@ -109,9 +117,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def _json(self, code, obj):
+    def _json(self, code, obj, extra=()):
         data = json.dumps(obj).encode()
         self.send_response(code)
+        for k, v in extra:
+            self.send_header(k, v)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(data)))
         self.end_headers()
@@ -212,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(body, [{"type": "text", "text": "MOCK-CUT"}], stop="max_tokens")
         record["answer"] = [b.get("name") or b.get("text") for b in content]
         stall = find(r"STALL=([0-9.]+)", user_texts)
-        self.reply(body, content, stall=min(float(stall), 60) if stall else 0)
+        self.reply(body, content, stall=min(float(stall), 60) if stall else 0, extra=self.plan_headers(user_texts))
 
     def rate_limited(self):
         data = json.dumps(
@@ -263,7 +273,28 @@ class Handler(BaseHTTPRequestHandler):
             text += f" ECHO-{echo}"
         return [{"type": "text", "text": text}]
 
-    def reply(self, body, content, stall=0, stop=None):
+    def plan_headers(self, texts):
+        """The headers of a plan's use, for the PLANUSE mark, or none."""
+        found = find(r"PLANUSE=([0-9.]+:[0-9.]+(?::warn)?)", list(reversed(texts)))
+        if not found:
+            return []
+        parts = found.split(":")
+        now = STARTED
+        warn = len(parts) > 2
+        return [
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-representative-claim", "five_hour"),
+            ("anthropic-ratelimit-unified-reset", str(now + 3600)),
+            ("anthropic-ratelimit-unified-5h-utilization", parts[0]),
+            ("anthropic-ratelimit-unified-5h-reset", str(now + 3600)),
+            ("anthropic-ratelimit-unified-5h-status", "allowed_warning" if warn else "allowed"),
+            *([("anthropic-ratelimit-unified-5h-surpassed-threshold", "0.9")] if warn else []),
+            ("anthropic-ratelimit-unified-7d-utilization", parts[1]),
+            ("anthropic-ratelimit-unified-7d-reset", str(now + 5 * 86400)),
+            ("anthropic-ratelimit-unified-7d-status", "allowed"),
+        ]
+
+    def reply(self, body, content, stall=0, stop=None, extra=()):
         stop = stop or ("tool_use" if any(b["type"] == "tool_use" for b in content) else "end_turn")
         usage = {
             "input_tokens": 11,
@@ -282,8 +313,10 @@ class Handler(BaseHTTPRequestHandler):
             "usage": usage,
         }
         if not body.get("stream"):
-            return self._json(200, msg)
+            return self._json(200, msg, extra)
         self.send_response(200)
+        for k, v in extra:
+            self.send_header(k, v)
         self.send_header("content-type", "text/event-stream")
         self.send_header("cache-control", "no-cache")
         self.send_header("connection", "close")

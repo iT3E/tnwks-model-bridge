@@ -349,6 +349,88 @@ export function planLimitOf(info) {
   };
 }
 
+// The limit windows of the plan, as the engine names them, and the statuses
+// of a window. A value outside these sets becomes "other".
+export const PLAN_WINDOWS = [
+  "five_hour",
+  "seven_day",
+  "seven_day_opus",
+  "seven_day_sonnet",
+  "seven_day_overage_included",
+  "overage",
+];
+export const PLAN_STATUSES = ["allowed", "allowed_warning", "rejected"];
+
+function oneOf(value, known) {
+  return known.includes(value) ? value : "other";
+}
+
+// A share of a window (a fraction, 1 is the limit), or null. It can pass 1
+// a little when use runs past a cap, so up to 10 is kept.
+function share(value) {
+  return Number.isFinite(value) && value >= 0 && value <= 10 ? Math.round(value * 10000) / 10000 : null;
+}
+
+// A warning threshold: a fraction of the limit, 0 to 1, or null.
+function fraction(value) {
+  return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
+}
+
+// A reset time in seconds since the epoch, inside the longest window, or null.
+function resetTime(value, now) {
+  if (!Number.isFinite(value)) return null;
+  const at = Math.round(value);
+  return at > now / 1000 - 3600 && at <= now / 1000 + MAX_RESET_SECONDS ? at : null;
+}
+
+// The plan's use of each limit window, from a `rate_limit_event` of the
+// engine, for the log: one entry for each window. The engine gives each
+// window in `unifiedWindows` (its use, reset time, status and the warning
+// threshold that it passed) when the vendor sent them; else the bridge
+// takes the top level, which is about the window that limits now. The
+// top-level `utilization` comes only with "allowed_warning". Known names,
+// numbers in range and null only: nothing else of the event.
+export function planWindowsOf(info, now = Date.now()) {
+  if (!info || typeof info !== "object") return [];
+  const limiting = PLAN_WINDOWS.includes(info.rateLimitType) ? info.rateLimitType : null;
+  const top = {
+    status: oneOf(info.status, PLAN_STATUSES),
+    utilization: share(info.utilization),
+    resets_at: resetTime(info.resetsAt, now),
+    threshold: fraction(info.surpassedThreshold),
+  };
+  const windows = info.unifiedWindows;
+  const named =
+    windows && typeof windows === "object" && !Array.isArray(windows)
+      ? Object.entries(windows).filter(([, w]) => w && typeof w === "object")
+      : [];
+  if (!named.length) return [{ window: limiting ?? "other", limiting: true, ...top }];
+  return named.slice(0, PLAN_WINDOWS.length).map(([name, w]) => {
+    const window = oneOf(name, PLAN_WINDOWS);
+    const isLimiting = limiting !== null && window === limiting;
+    return {
+      window,
+      limiting: isLimiting,
+      status: w.status === undefined && isLimiting ? top.status : oneOf(w.status, PLAN_STATUSES),
+      utilization: share(w.utilization),
+      resets_at: resetTime(w.resetsAt, now),
+      threshold: fraction(w.surpassedThreshold),
+    };
+  });
+}
+
+// The token counts of an answer, from its usage: whole numbers only.
+export function tokensOf(usage) {
+  const count = (v) => (Number.isInteger(v) && v >= 0 ? v : undefined);
+  const out = {
+    input_tokens: count(usage?.input_tokens),
+    output_tokens: count(usage?.output_tokens),
+    cache_read_tokens: count(usage?.cache_read_input_tokens),
+    cache_write_tokens: count(usage?.cache_creation_input_tokens),
+  };
+  return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined));
+}
+
 // The answer of the bridge to a turn that failed with `kind`. A rate limit
 // of the plan is 429 with rate_limit_error. The bridge sends a retry-after
 // only with a reset time of the plan (seconds since the epoch) that is in

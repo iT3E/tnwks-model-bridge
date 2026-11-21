@@ -175,8 +175,10 @@ async function handleMessages(req, res, started, work) {
     mode,
     callMs: config.callMs,
     // The status of the answer, or of its error. An error in a stream that
-    // started (HTTP 200) went as an `error` event: `error_in_stream`.
-    onEnd: (status, inStream) => done(status, inStream ? { ...extra, error_in_stream: true } : extra),
+    // started (HTTP 200) went as an `error` event: `error_in_stream`. An
+    // answer adds its token counts.
+    onEnd: (status, inStream, tokens) =>
+      done(status, { ...extra, ...(inStream ? { error_in_stream: true } : {}), ...tokens }),
   });
   work.sink = sink;
   conversation.attach(sink);

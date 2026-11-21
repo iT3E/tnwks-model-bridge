@@ -19,17 +19,22 @@ import {
   lastToolUseIds,
   newInput,
   planLimitOf,
+  planWindowsOf,
   resultKind,
   sha,
   shapeDiff,
   shortHash,
   systemText,
   thinkingOf,
+  tokensOf,
   toMcpResult,
   withoutCacheMarks,
 } from "./messages.mjs";
 
 const SERVER = "client";
+// A plan_limit line with the same values goes out again after this time,
+// so a reader of the log sees that the values still hold.
+const PLAN_REPEAT_MS = 30 * 60 * 1000;
 const PREFIX = `mcp__${SERVER}__`;
 
 // The environment variables that an engine process gets from the bridge.
@@ -92,7 +97,8 @@ function errorType(status) {
 // one JSON body. A stream starts (status 200 and its headers) with its first
 // event, so an error before it is an HTTP error. `onEnd(status, inStream)`
 // runs one time, when the call ends: the status of the answer, or of the
-// error, and whether the error went as an `error` event in a stream.
+// error, whether the error went as an `error` event in a stream, and the
+// token counts of the answer (tokensOf), when there is one.
 export class Sink {
   constructor({ res, stream, conversation, mode, callMs, onEnd }) {
     this.res = res;
@@ -124,10 +130,11 @@ export class Sink {
   end() {
     this.done = true;
     clearTimeout(this.timer);
-    this.onEnd?.(this.status, this.inStream);
+    this.onEnd?.(this.status, this.inStream, this.tokens ?? {});
   }
   finish(message) {
     if (this.done) return;
+    this.tokens = tokensOf(message?.usage);
     if (this.stream) {
       this.start();
       this.res.end();
@@ -171,6 +178,10 @@ export class Registry {
     this.log = log;
     this.all = new Set();
     this.domains = new Map();
+    // The last plan_limit line of each trust domain and window: its values
+    // and when it went out.
+    this.planLines = new Map();
+    this.planRepeatMs = PLAN_REPEAT_MS;
     mkdirSync(this.workDir, { recursive: true, mode: 0o700 });
   }
 
@@ -263,6 +274,24 @@ export class Registry {
   sweep() {
     const now = Date.now();
     for (const c of [...this.all]) if (!c.sink && now - c.touched > this.idleMs) c.close("idle");
+  }
+
+  // The plan's word on its limits, from a rate_limit_event of an engine: one
+  // `plan_limit` line for each window, when its status, its use in whole
+  // percent, its reset time or its threshold changed since the last line
+  // of the same trust domain and window, or when that line is older than
+  // `planRepeatMs`. Each engine sends the event at its first answer and
+  // then when a value changes, so the lines stay few.
+  notePlan(domainName, info, now = Date.now()) {
+    for (const w of planWindowsOf(info, now)) {
+      const id = `${domainName}/${w.window}`;
+      const percent = w.utilization === null ? null : Math.round(w.utilization * 100);
+      const values = `${w.status}|${percent}|${w.resets_at}|${w.threshold}|${w.limiting}`;
+      const last = this.planLines.get(id);
+      if (last && last.values === values && now - last.at < this.planRepeatMs) continue;
+      this.planLines.set(id, { values, at: now });
+      this.log("plan_limit", { domain: domainName, ...w });
+    }
   }
 
   closeAll(reason) {
@@ -401,6 +430,7 @@ export class Conversation {
         } else if (msg.type === "rate_limit_event") {
           // The plan's word on its limit, for the answer to a rate limit.
           this.planLimit = planLimitOf(msg.rate_limit_info);
+          this.registry.notePlan(this.domainName, msg.rate_limit_info);
         } else if (msg.type === "assistant" && msg.error) {
           // The error of the API in this turn, such as "rate_limit". The
           // result of the turn comes after it.

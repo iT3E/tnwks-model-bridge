@@ -144,7 +144,9 @@ One JSON line on standard output for each call: `domain`, `model`,
 `dropped` (field names) and
 `cache_marks_removed`, and for a matched call `tool_results_not_awaited`
 when some tool results found no tool call of the engine that waited for
-them. `status` is the status of the answer, or of its
+them. A call with an answer also has its token counts: `input_tokens`,
+`output_tokens`, `cache_read_tokens` and `cache_write_tokens`.
+`status` is the status of the answer, or of its
 error: a call that failed in a stream that started has the status of the
 error and `error_in_stream: true`. A refused call (401) has `status` and
 `ms` only.
@@ -160,6 +162,23 @@ the engine does not have), `tool_calls_not_asked` (earlier tool calls that
 the engine never asked the bridge for) and `tool_calls_waiting`; the
 conversation then ends with the reason `orphan_model_call`), `drain_start` and `drain_end` (the count of
 calls cut).
+
+A `plan_limit` line gives the plan's word on its limits, from the
+`rate_limit_event` of the engine: one line for each limit window, with
+`domain`, `window` (`five_hour`, `seven_day`, `seven_day_opus`,
+`seven_day_sonnet`, `seven_day_overage_included`, `overage` or `other`),
+`limiting` (the window that limits now), `status` (`allowed`,
+`allowed_warning`, `rejected` or `other`), `utilization` (the share of the
+window used, 1 is the limit, or null), `resets_at` (seconds since the
+epoch, or null) and `threshold` (the warning threshold that the window
+passed, or null). The engine gives the use of each window in a field that
+it marks internal (`unifiedWindows`), when the vendor sent it; without it,
+the line is about the limiting window, and its `utilization` comes only
+with `allowed_warning`. Only an engine that signs in to a plan gets these
+events; with an API key there are none. A line goes out when the status,
+the use in whole percent, the reset time or the threshold of a window
+changes for a trust domain, and again after 30 minutes with the same
+values when an event comes. Known names and numbers only.
 
 A `rebuild` line tells why a call with a history matched no live
 conversation. It changes nothing. Among the live conversations of the
