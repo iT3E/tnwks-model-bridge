@@ -21,4 +21,4 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: iT3E/github-workflows/.github/workflows/labeler.yaml@7a7fbecebab0e5a161848c1b1920741f2f2b8a4e # v1.9.7
+    uses: iT3E/github-workflows/.github/workflows/labeler.yaml@7c27870367cf3d50dadef576494a59f5c0687156 # v1.9.8
