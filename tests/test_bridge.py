@@ -802,6 +802,63 @@ class BridgeTest(unittest.TestCase):
         self.ok(second, "rebuilt")
         self.assertNotEqual(second.conversation, first.conversation)
 
+    def test_25_the_plan_use_of_each_window_is_in_the_log(self):
+        """A bridge that signs in as a plan (a fake token, no upstream key)
+        logs the plan's use of each limit window: one plan_limit line for
+        each window when a value changes, none for the same values in a new
+        conversation, and the token counts on each call line. Known names
+        and numbers only."""
+        plan = self.rig.spawn("plan", 4, ANTHROPIC_API_KEY=None, CLAUDE_CODE_OAUTH_TOKEN="fake-oauth-token-" + "0" * 24)
+
+        def plan_lines(count=0, timeout=10):
+            """The plan_limit lines, after a wait for `count` of them: the
+            engine sends its event just after the answer."""
+            deadline = time.time() + timeout
+            while True:
+                lines = [l for l in plan.log_lines() if l.get("event") == "plan_limit"]
+                if len(lines) >= count or time.time() > deadline:
+                    return lines
+                time.sleep(0.2)
+
+        def ask(use):
+            res = call(plan.port, body([user(f"PLANUSE={use} ECHO={mark('PLAN-USE')}")], tools=()), key=KEYS["finance"])
+            self.ok(res, "new")
+            return res
+
+        first = ask("0.42:0.10")
+        lines = plan_lines(2)
+        allowed = {"ts", "event", "domain", "window", "limiting", "status", "utilization", "resets_at", "threshold"}
+        for line in lines:
+            self.assertEqual(set(line), allowed, line)
+        by = {l["window"]: l for l in lines}
+        self.assertEqual(sorted(by), ["five_hour", "seven_day"], lines)
+        self.assertEqual(
+            {k: by["five_hour"][k] for k in ("domain", "limiting", "status", "utilization", "threshold")},
+            {"domain": "finance", "limiting": True, "status": "allowed", "utilization": 0.42, "threshold": None},
+        )
+        self.assertEqual((by["seven_day"]["limiting"], by["seven_day"]["utilization"]), (False, 0.1))
+        self.assertGreater(by["seven_day"]["resets_at"], by["five_hour"]["resets_at"])
+
+        call_line = self.calls_of(plan, first.conversation)[0]
+        self.assertEqual(
+            {k: call_line[k] for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")},
+            {"input_tokens": 11, "output_tokens": 22, "cache_read_tokens": 0, "cache_write_tokens": 0},
+        )
+
+        ask("0.42:0.10")
+        time.sleep(2)
+        self.assertEqual(len(plan_lines()), 2, plan_lines())
+
+        ask("0.95:0.20:warn")
+        new = plan_lines(4)[2:]
+        by = {l["window"]: l for l in new}
+        self.assertEqual(sorted(by), ["five_hour", "seven_day"], new)
+        self.assertEqual(
+            (by["five_hour"]["status"], by["five_hour"]["utilization"], by["five_hour"]["threshold"]),
+            ("allowed_warning", 0.95, 0.9),
+        )
+        self.assertEqual((by["seven_day"]["status"], by["seven_day"]["utilization"]), ("allowed", 0.2))
+
     def test_99_no_marker_text_in_the_log(self):
         """The log of each bridge holds no text of a conversation and no key:
         none of the marker texts of the tests above, and no fake key."""

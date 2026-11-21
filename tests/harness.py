@@ -84,7 +84,7 @@ class Bridge:
         self.log_path = None
 
     def env(self, upstream):
-        return {
+        env = {
             "BRIDGE_KEY_MAIN": KEYS["main"],
             "BRIDGE_KEY_FINANCE": KEYS["finance"],
             "BRIDGE_KEY_WORKFLOWS": KEYS["workflows"],
@@ -97,6 +97,9 @@ class Bridge:
             "NO_PROXY": "mock,127.0.0.1,localhost",
             **self.extra_env,
         }
+        # A value of None takes a variable out, for example the upstream key
+        # of a bridge that signs in as a plan does.
+        return {k: v for k, v in env.items() if v is not None}
 
     def log(self):
         if self.rig.mode == "container":
