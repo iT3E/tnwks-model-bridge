@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.3.0 - 2026-11-21
+
+### Added
+
+* A plan_limit log line for each limit window of the plan (its status, the share used, the reset time and a passed warning threshold), from the rate_limit_event of the engine, when a value changes. The call line gets the token counts of the answer. Known names and numbers only.
+
 ## v0.2.7 - 2026-11-17
 
 ### Fixed
