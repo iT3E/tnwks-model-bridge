@@ -30,7 +30,7 @@ jobs:
     name: node
     permissions:
       contents: read
-    uses: iT3E/github-workflows/.github/workflows/node.yaml@7c27870367cf3d50dadef576494a59f5c0687156 # v1.9.8
+    uses: iT3E/github-workflows/.github/workflows/node.yaml@4628c925b741e980e4dfab955ec7e7db5dc14ef1 # v1.10.0
     with:
       node-version-file: .nvmrc
       lint: true
@@ -42,7 +42,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: iT3E/github-workflows/.github/workflows/image.yaml@7c27870367cf3d50dadef576494a59f5c0687156 # v1.9.8
+    uses: iT3E/github-workflows/.github/workflows/image.yaml@4628c925b741e980e4dfab955ec7e7db5dc14ef1 # v1.10.0
     with:
       push-main: false
       privacy-gate: history
