@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.3.3 - 2026-11-23
+
+### Fixed
+
+* Dependency updates: feat(node): update @anthropic-ai/sdk to 1.11.0 (#21)
+
 ## v0.3.2 - 2026-11-23
 
 ### Fixed
