@@ -3,6 +3,12 @@
 Notable changes to this repository, newest first. Each PR adds a Changie
 fragment under `.changes/unreleased/`; merging to `main` releases them.
 
+## v0.3.2 - 2026-11-23
+
+### Fixed
+
+* Dependency updates: feat(node): update eslint to 10.15.0 (#22)
+
 ## v0.3.1 - 2026-11-23
 
 ### Fixed
